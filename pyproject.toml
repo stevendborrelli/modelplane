@@ -12,6 +12,15 @@ package = false
 [tool.uv.workspace]
 members = ["functions/*", "schemas/python"]
 
+# The composition functions declare composed-resource ordering, which needs
+# a Crossplane and an SDK that both support the dependencies field. Neither
+# has released yet, so resolve the SDK from the branch that adds it. Replace
+# this with a plain version bound once it ships - the functions can't build
+# against 0.14.0, which has no response.add_dependency. For the matching
+# Crossplane, see CROSSPLANE_IMAGE in e2e/README.md.
+[tool.uv.sources]
+crossplane-function-sdk-python = { git = "https://github.com/stevendborrelli/function-sdk-python", rev = "8e5a0b2427d47c4e8fd0bbb8e3888677f8e489d7" }
+
 [dependency-groups]
 dev = [
   "crossplane-function-sdk-python>=0.14.0",
