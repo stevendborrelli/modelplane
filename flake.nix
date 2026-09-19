@@ -64,7 +64,6 @@
         "compose-model-endpoint"
         "compose-model-replica"
         "compose-model-service"
-        "compose-usages"
       ];
 
       supportedSystems = [

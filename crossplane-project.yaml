@@ -69,10 +69,6 @@ spec:
       pathPrefix: _output/functions/compose-model-service
   - source: Tarball
     tarball:
-      name: compose-usages
-      pathPrefix: _output/functions/compose-usages
-  - source: Tarball
-    tarball:
       name: compose-vultr-cluster
       pathPrefix: _output/functions/compose-vultr-cluster
   dependencies:

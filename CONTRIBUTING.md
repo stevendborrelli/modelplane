@@ -277,9 +277,9 @@ XRDs or dependencies you've removed don't linger.
 Every function has tests under `functions/<name>/tests/test_fn.py`. The
 canonical form is a table of `Case`s, each running the function on a
 `RunFunctionRequest` and comparing the whole `RunFunctionResponse` against an
-expected one — not asserting on individual fields. `compose-usages` is a clean
-example; `compose-model-cache` shows the same form scaled up to a multi-pass
-reconcile. The skeleton:
+expected one — not asserting on individual fields. `compose-inference-class` is
+a clean example; `compose-model-cache` shows the same form scaled up to a
+multi-pass reconcile. The skeleton:
 
 ```python
 @dataclasses.dataclass

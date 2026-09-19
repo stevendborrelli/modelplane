@@ -20,7 +20,8 @@ built from the provider models with literal arguments typed here, never
 from the stacks package, so a stack-data change shows up as a test diff.
 The golden inventory then pins the composed-resource key set - the
 identity contract; renaming a key deletes and recreates the remote
-resource - for every cloud and stack, as frozen literals.
+resource - and the ordering edges between components, for every cloud
+and stack, as frozen literals.
 """
 
 import copy
@@ -42,7 +43,6 @@ from models.io.crossplane.m.kubernetes.object import v1alpha1 as k8sobjv1alpha1
 from models.io.crossplane.m.kubernetes.providerconfig import (
     v1alpha1 as k8spcv1alpha1,
 )
-from models.io.crossplane.protection.usage import v1beta1 as usagev1beta1
 from models.io.k8s.apimachinery.pkg.apis.meta import v1 as metav1
 
 
@@ -52,9 +52,6 @@ def setUpModule() -> None:
 
 # Precomputed child_name value for test-backend.
 _PC_NAME = "test-backend-cluster-63fde"
-
-_RELEASE_REF = ("helm.m.crossplane.io/v1beta1", "Release")
-_OBJECT_REF = ("kubernetes.m.crossplane.io/v1alpha1", "Object")
 
 _GATEWAY_READY_CEL = "has(object.status.addresses) && object.status.addresses.size() > 0"
 _MODELEXPRESS_READY_CEL = (
@@ -78,6 +75,7 @@ def _crds(filename: str) -> list[dict]:
 def _request(cloud: str, stack: str, observed: dict | None = None) -> fnv1.RunFunctionRequest:
     """Build a RunFunctionRequest for a test-backend ServingStack."""
     return fnv1.RunFunctionRequest(
+        meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_CAPABILITIES, fnv1.CAPABILITY_DEPENDENCIES]),
         observed=fnv1.State(
             composite=fnv1.Resource(
                 resource=resource.dict_to_struct(
@@ -102,7 +100,6 @@ def _request(cloud: str, stack: str, observed: dict | None = None) -> fnv1.RunFu
 
 
 def _release(
-    key: str,
     release: str,
     namespace: str,
     chart: str,
@@ -114,10 +111,7 @@ def _release(
 ) -> fnv1.Resource:
     """The expected Release for a Chart entry, built from literal arguments."""
     model = helmv1beta1.Release(
-        metadata=metav1.ObjectMeta(
-            annotations={"crossplane.io/external-name": release},
-            labels={"modelplane.ai/resource": key},
-        ),
+        metadata=metav1.ObjectMeta(annotations={"crossplane.io/external-name": release}),
         spec=helmv1beta1.Spec(
             providerConfigRef=helmv1beta1.ProviderConfigRef(kind="ProviderConfig", name=_PC_NAME),
             forProvider=helmv1beta1.ForProvider(
@@ -136,10 +130,9 @@ def _release(
     return res
 
 
-def _object(key: str, manifest: dict, cel: str | None = None) -> fnv1.Resource:
+def _object(manifest: dict, cel: str | None = None) -> fnv1.Resource:
     """The expected Object for one manifest, built from literal arguments."""
     model = k8sobjv1alpha1.Object(
-        metadata=metav1.ObjectMeta(labels={"modelplane.ai/resource": key}),
         spec=k8sobjv1alpha1.Spec(
             providerConfigRef=k8sobjv1alpha1.ProviderConfigRef(kind="ProviderConfig", name=_PC_NAME),
             forProvider=k8sobjv1alpha1.ForProvider(manifest=manifest),
@@ -152,35 +145,9 @@ def _object(key: str, manifest: dict, cel: str | None = None) -> fnv1.Resource:
     return res
 
 
-def _usage(of_ref: tuple[str, str], of_key: str, by_ref: tuple[str, str], by_key: str) -> fnv1.Resource:
-    """The expected teardown Usage for one dependency edge, ready on arrival."""
-    res = fnv1.Resource()
-    resource.update(
-        res,
-        usagev1beta1.Usage(
-            spec=usagev1beta1.Spec(
-                of=usagev1beta1.Of(
-                    apiVersion=of_ref[0],
-                    kind=of_ref[1],
-                    resourceSelector=usagev1beta1.ResourceSelectorModel(
-                        matchControllerRef=True,
-                        matchLabels={"modelplane.ai/resource": of_key},
-                    ),
-                ),
-                by=usagev1beta1.By(
-                    apiVersion=by_ref[0],
-                    kind=by_ref[1],
-                    resourceSelector=usagev1beta1.ResourceSelector(
-                        matchControllerRef=True,
-                        matchLabels={"modelplane.ai/resource": by_key},
-                    ),
-                ),
-                replayDeletion=True,
-            ),
-        ),
-    )
-    res.ready = fnv1.READY_TRUE
-    return res
+def _dependency(resource_name: str, depends_on: str) -> fnv1.Dependency:
+    """The expected ordering edge: resource_name waits on depends_on."""
+    return fnv1.Dependency(resource=resource_name, composed_resource=depends_on)
 
 
 def _provider_configs(*, ready: bool = True) -> dict[str, fnv1.Resource]:
@@ -247,24 +214,42 @@ def _observed_pcs() -> dict[str, fnv1.Resource]:
     }
 
 
-# The Usages every Existing/Dynamo pass composes: the two hand-written
-# gateway-chain edges, and one derived edge per depends_on in the joined
-# stack data.
-_EXISTING_DYNAMO_USAGES = {
-    "usage-gateway-class-by-gateway": _usage(_OBJECT_REF, "gateway-class", _OBJECT_REF, "gateway"),
-    "usage-envoy-gateway-by-gateway-class": _usage(_RELEASE_REF, "envoy-gateway", _OBJECT_REF, "gateway-class"),
-    "usage-cert-manager-by-envoy-gateway": _usage(_RELEASE_REF, "cert-manager", _RELEASE_REF, "envoy-gateway"),
-    "usage-ai-gateway-crds-by-ai-gateway": _usage(_RELEASE_REF, "ai-gateway-crds", _RELEASE_REF, "ai-gateway"),
-    "usage-gateway-namespace-by-gateway-proxy": _usage(_OBJECT_REF, "gateway-namespace", _OBJECT_REF, "gateway-proxy"),
-    "usage-kai-scheduler-by-kai-queue-root": _usage(_RELEASE_REF, "kai-scheduler", _OBJECT_REF, "kai-queue-root"),
-    "usage-kai-scheduler-by-kai-queue": _usage(_RELEASE_REF, "kai-scheduler", _OBJECT_REF, "kai-queue"),
-    "usage-modelexpress-crds-modelmetadatas.modelexpress.nvidia.com-by-modelexpress-server": _usage(
-        _OBJECT_REF, "modelexpress-crds-modelmetadatas.modelexpress.nvidia.com", _OBJECT_REF, "modelexpress-server"
-    ),
-    "usage-modelexpress-crds-modelcacheentries.modelexpress.nvidia.com-by-modelexpress-server": _usage(
-        _OBJECT_REF, "modelexpress-crds-modelcacheentries.modelexpress.nvidia.com", _OBJECT_REF, "modelexpress-server"
-    ),
-}
+# The ordering edges between components every Existing/Dynamo pass
+# declares: the two hand-written gateway-chain edges, and one derived
+# edge per depends_on in the joined stack data. The edges to the
+# ProviderConfigs are mechanical, so _pc_dependencies derives them from
+# the composed resources rather than repeating them here.
+_EXISTING_DYNAMO_EDGES = [
+    _dependency("gateway", "gateway-class"),
+    _dependency("gateway-class", "envoy-gateway"),
+    _dependency("envoy-gateway", "cert-manager"),
+    _dependency("ai-gateway", "ai-gateway-crds"),
+    _dependency("gateway-proxy", "gateway-namespace"),
+    _dependency("kai-queue-root", "kai-scheduler"),
+    _dependency("kai-queue", "kai-scheduler"),
+    _dependency("modelexpress-server", "modelexpress-crds-modelmetadatas.modelexpress.nvidia.com"),
+    _dependency("modelexpress-server", "modelexpress-crds-modelcacheentries.modelexpress.nvidia.com"),
+]
+
+
+def _pc_dependencies(resources: dict[str, fnv1.Resource]) -> list[fnv1.Dependency]:
+    """Every composed resource's edge to the ProviderConfig it targets.
+
+    One edge per resource, to the ProviderConfig its kind reads: this is
+    what keeps first creation from racing a ProviderConfig Crossplane
+    hasn't persisted, and what holds the ProviderConfig through teardown.
+    Derived from the expected resources, which are themselves literals,
+    so a component appearing or disappearing still moves it.
+    """
+    return [
+        _dependency(
+            key,
+            "provider-config-helm"
+            if resource.struct_to_dict(res.resource)["kind"] == "Release"
+            else "provider-config-kubernetes",
+        )
+        for key, res in resources.items()
+    ]
 
 
 def _kai_queue(name: str, parent: str | None) -> dict:
@@ -290,7 +275,6 @@ def _existing_dynamo_stack() -> dict[str, fnv1.Resource]:
 
     # --- the Existing cloud half (hand-written Modelplane pins) ---
     out["cert-manager"] = _release(
-        key="cert-manager",
         release="mp-cert-manager",
         namespace="cert-manager",
         chart="cert-manager",
@@ -300,7 +284,6 @@ def _existing_dynamo_stack() -> dict[str, fnv1.Resource]:
         values={"crds": {"enabled": True, "keep": False}},
     )
     out["kube-prometheus-stack"] = _release(
-        key="kube-prometheus-stack",
         release="mp-kube-prometheus-stack",
         namespace="monitoring",
         chart="kube-prometheus-stack",
@@ -344,7 +327,6 @@ def _existing_dynamo_stack() -> dict[str, fnv1.Resource]:
         },
     )
     out["node-feature-discovery"] = _release(
-        key="node-feature-discovery",
         release="mp-node-feature-discovery",
         namespace="node-feature-discovery",
         chart="node-feature-discovery",
@@ -357,7 +339,6 @@ def _existing_dynamo_stack() -> dict[str, fnv1.Resource]:
         },
     )
     out["nvidia-dra-driver-gpu"] = _release(
-        key="nvidia-dra-driver-gpu",
         release="mp-dra-driver-nvidia-gpu",
         namespace="nvidia-dra-driver",
         chart="dra-driver-nvidia-gpu",
@@ -371,7 +352,6 @@ def _existing_dynamo_stack() -> dict[str, fnv1.Resource]:
 
     # --- the common half ---
     out["envoy-gateway"] = _release(
-        key="envoy-gateway",
         release="mp-gateway-helm",
         namespace="envoy-gateway-system",
         chart="gateway-helm",
@@ -408,7 +388,6 @@ def _existing_dynamo_stack() -> dict[str, fnv1.Resource]:
         },
     )
     out["ai-gateway-crds"] = _release(
-        key="ai-gateway-crds",
         release="mp-ai-gateway-crds-helm",
         namespace="envoy-ai-gateway-system",
         chart="ai-gateway-crds-helm",
@@ -417,7 +396,6 @@ def _existing_dynamo_stack() -> dict[str, fnv1.Resource]:
         wait=True,
     )
     out["ai-gateway"] = _release(
-        key="ai-gateway",
         release="mp-ai-gateway-helm",
         namespace="envoy-ai-gateway-system",
         chart="ai-gateway-helm",
@@ -426,13 +404,11 @@ def _existing_dynamo_stack() -> dict[str, fnv1.Resource]:
     )
     for doc in _crds("gaie.yaml"):
         key = f"gaie-crds-{doc['metadata']['name']}"
-        out[key] = _object(key, doc)
+        out[key] = _object(doc)
     out["gateway-namespace"] = _object(
-        "gateway-namespace",
         {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "modelplane-system"}},
     )
     out["gateway-proxy"] = _object(
-        "gateway-proxy",
         {
             "apiVersion": "gateway.envoyproxy.io/v1alpha1",
             "kind": "EnvoyProxy",
@@ -446,7 +422,6 @@ def _existing_dynamo_stack() -> dict[str, fnv1.Resource]:
         },
     )
     out["dra-driver-critical-pods-quota"] = _object(
-        "dra-driver-critical-pods-quota",
         {
             "apiVersion": "v1",
             "kind": "ResourceQuota",
@@ -468,7 +443,6 @@ def _existing_dynamo_stack() -> dict[str, fnv1.Resource]:
 
     # --- the Dynamo half ---
     out["grove"] = _release(
-        key="grove",
         release="mp-grove-charts",
         namespace="grove-system",
         chart="grove-charts",
@@ -476,7 +450,6 @@ def _existing_dynamo_stack() -> dict[str, fnv1.Resource]:
         version="v0.1.0-alpha.12-rc2",
     )
     out["kai-scheduler"] = _release(
-        key="kai-scheduler",
         release="mp-kai-scheduler",
         namespace="kai-scheduler",
         chart="kai-scheduler",
@@ -484,17 +457,15 @@ def _existing_dynamo_stack() -> dict[str, fnv1.Resource]:
         version="v0.16.8",
         wait=True,
     )
-    out["kai-queue-root"] = _object("kai-queue-root", _kai_queue("modelplane-root", None))
-    out["kai-queue"] = _object("kai-queue", _kai_queue("modelplane", "modelplane-root"))
+    out["kai-queue-root"] = _object(_kai_queue("modelplane-root", None))
+    out["kai-queue"] = _object(_kai_queue("modelplane", "modelplane-root"))
     for doc in _crds("modelexpress.yaml"):
         key = f"modelexpress-crds-{doc['metadata']['name']}"
-        out[key] = _object(key, doc)
+        out[key] = _object(doc)
     out["modelexpress-server-sa"] = _object(
-        "modelexpress-server-sa",
         {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": _MX_META},
     )
     out["modelexpress-server-role"] = _object(
-        "modelexpress-server-role",
         {
             "apiVersion": "rbac.authorization.k8s.io/v1",
             "kind": "Role",
@@ -519,7 +490,6 @@ def _existing_dynamo_stack() -> dict[str, fnv1.Resource]:
         },
     )
     out["modelexpress-server-rolebinding"] = _object(
-        "modelexpress-server-rolebinding",
         {
             "apiVersion": "rbac.authorization.k8s.io/v1",
             "kind": "RoleBinding",
@@ -529,7 +499,6 @@ def _existing_dynamo_stack() -> dict[str, fnv1.Resource]:
         },
     )
     out["modelexpress-server-svc"] = _object(
-        "modelexpress-server-svc",
         {
             "apiVersion": "v1",
             "kind": "Service",
@@ -541,7 +510,6 @@ def _existing_dynamo_stack() -> dict[str, fnv1.Resource]:
         },
     )
     out["modelexpress-server"] = _object(
-        "modelexpress-server",
         {
             "apiVersion": "apps/v1",
             "kind": "Deployment",
@@ -582,7 +550,6 @@ def _existing_dynamo_stack() -> dict[str, fnv1.Resource]:
 
     # --- the hand-rendered gateway pair ---
     out["gateway-class"] = _object(
-        "gateway-class",
         {
             "apiVersion": "gateway.networking.k8s.io/v1",
             "kind": "GatewayClass",
@@ -599,7 +566,6 @@ def _existing_dynamo_stack() -> dict[str, fnv1.Resource]:
         },
     )
     out["gateway"] = _object(
-        "gateway",
         {
             "apiVersion": "gateway.networking.k8s.io/v1",
             "kind": "Gateway",
@@ -622,7 +588,11 @@ def _existing_dynamo_stack() -> dict[str, fnv1.Resource]:
     return out
 
 
-def _response(resources: dict[str, fnv1.Resource], status: dict | None = None) -> fnv1.RunFunctionResponse:
+def _response(
+    resources: dict[str, fnv1.Resource],
+    status: dict | None = None,
+    dependencies: list[fnv1.Dependency] | None = None,
+) -> fnv1.RunFunctionResponse:
     """A whole expected response: 60s TTL, empty context, the XR status."""
     return fnv1.RunFunctionResponse(
         meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
@@ -631,7 +601,23 @@ def _response(resources: dict[str, fnv1.Resource], status: dict | None = None) -
             resources=resources,
         ),
         context=structpb.Struct(),
+        dependencies=fnv1.Dependencies(items=dependencies or []),
     )
+
+
+def _dict(rsp: fnv1.RunFunctionResponse) -> dict:
+    """A response as a dict, with its dependencies in a stable order.
+
+    Dependencies are a repeated field, so MessageToDict preserves the
+    order the function emitted them in. That order carries no meaning -
+    Crossplane reads the edges as a set - so sort both sides rather than
+    pin an emission order the function is free to change.
+    """
+    d = json_format.MessageToDict(rsp)
+    items = d.get("dependencies", {}).get("items")
+    if items:
+        items.sort(key=lambda dep: (dep.get("resource", ""), dep.get("composedResource", "")))
+    return d
 
 
 @dataclasses.dataclass
@@ -649,27 +635,16 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
         cls.runner = fn.FunctionRunner()
 
     async def test_compose(self) -> None:
-        full = _provider_configs() | _EXISTING_DYNAMO_USAGES | _existing_dynamo_stack()
+        stack = _existing_dynamo_stack()
+        dependencies = _pc_dependencies(stack) + _EXISTING_DYNAMO_EDGES
+        full = _provider_configs() | stack
 
-        # Second pass: PCs observed. depends_on gates first creation, so
-        # only the dependency-free wave renders; each dependent waits for
-        # its dependency's Ready before it is first created.
-        dep_gated = {
-            "envoy-gateway",  # -> cert-manager
-            "ai-gateway",  # -> ai-gateway-crds
-            "gateway-proxy",  # -> gateway-namespace
-            "kai-queue-root",  # -> kai-scheduler
-            "kai-queue",  # -> kai-scheduler
-            "modelexpress-server",  # -> modelexpress-crds
-        }
-        first_wave = {k: v for k, v in full.items() if k not in dep_gated}
-
-        # Third pass: every rendered resource observed Ready (the gateway
-        # with its address assigned), so everything is marked ready and
-        # the address lands in the XR status.
-        rendered = [k for k in _existing_dynamo_stack() if k != "gateway"]
+        # Every pass composes the whole stack: the function declares the
+        # order and Crossplane enacts it, rather than withholding
+        # resources from desired state until their dependencies are
+        # ready. Readiness is what still moves between passes.
         observed_ready = _observed_pcs()
-        for key in rendered:
+        for key in (k for k in stack if k != "gateway"):
             observed_ready[key] = fnv1.Resource(
                 resource=resource.dict_to_struct({"status": {"conditions": [{"type": "Ready", "status": "True"}]}})
             )
@@ -685,47 +660,55 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                 }
             )
         )
-        # Every component observed Ready; PCs and Usages are ready on arrival.
         all_ready = copy.deepcopy(full)
         for res in all_ready.values():
             res.ready = fnv1.READY_TRUE
 
         cases = [
             Case(
-                name="first pass composes only the provider configs and usages",
+                name="first pass composes the whole stack behind unready provider configs",
                 req=_request("Existing", "Dynamo"),
-                # Everything targeting the remote cluster is gated on the
-                # ProviderConfigs having been observed; Usages reference
-                # nothing remote and compose immediately. The unready
-                # ProviderConfigs keep the composite unready until the
-                # stack actually renders.
-                want=_response(_provider_configs(ready=False) | _EXISTING_DYNAMO_USAGES),
+                # Nothing is ready yet, and everything targeting the
+                # remote cluster depends on a ProviderConfig, so
+                # Crossplane creates the ProviderConfigs and nothing
+                # else. The unready ProviderConfigs also keep the
+                # composite unready.
+                want=_response(_provider_configs(ready=False) | stack, dependencies=dependencies),
             ),
             Case(
-                name="second pass renders the dependency-free wave",
+                name="observed provider configs are ready, releasing the rest of the graph",
                 req=_request("Existing", "Dynamo", observed=_observed_pcs()),
-                want=_response(first_wave),
+                want=_response(_provider_configs() | stack, dependencies=dependencies),
             ),
             Case(
-                name="all dependencies ready renders the whole stack, marks it ready, and writes the gateway address",
+                name="every component observed ready marks the stack ready and writes the gateway address",
                 req=_request("Existing", "Dynamo", observed=observed_ready),
-                want=_response(all_ready, status={"gateway": {"address": "203.0.113.7"}}),
+                want=_response(all_ready, status={"gateway": {"address": "203.0.113.7"}}, dependencies=dependencies),
             ),
         ]
         for case in cases:
             with self.subTest(case.name):
                 got = await self.runner.RunFunction(case.req, None)
-                self.assertEqual(
-                    json_format.MessageToDict(case.want),
-                    json_format.MessageToDict(got),
-                    "-want, +got",
-                )
+                self.assertEqual(_dict(case.want), _dict(got), "-want, +got")
+
+    async def test_compose_without_dependency_support(self) -> None:
+        """A Crossplane that ignores dependencies would create the whole
+        stack at once and tear it down in no order, so the function fails
+        the pipeline rather than composing into it."""
+        req = _request("Existing", "Dynamo")
+        req.meta.ClearField("capabilities")
+
+        got = await self.runner.RunFunction(req, None)
+
+        self.assertEqual([fnv1.SEVERITY_FATAL], [r.severity for r in got.results])
+        self.assertEqual({}, dict(got.desired.resources))
 
     async def test_identity_secret_type_flows_to_provider_configs(self) -> None:
         """A non-GCP identity secret's type is stamped verbatim on both
         ProviderConfigs rather than being forced to GoogleApplicationCredentials,
         and its own namespace wins over the XR's."""
         req = fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_CAPABILITIES, fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=fnv1.Resource(
                     resource=resource.dict_to_struct(
@@ -759,10 +742,10 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
 # The composed-resource key a component renders under is its identity:
 # renaming one deletes and recreates the remote resource (for an Object
 # holding a CRD, the CRD and its CRs). This pins the full key set per
-# cloud and stack, including the Usage keys derived from depends_on, as
-# reviewed literals. A failure here means the stack data changed a key -
-# make sure that's intended, then update the inventory and the release
-# notes.
+# cloud and stack, and the ordering edges depends_on derives between
+# components, as reviewed literals. A failure here means the stack data
+# changed a key or an edge - make sure that's intended, then update the
+# inventory and the release notes.
 
 _ALWAYS = frozenset(
     {
@@ -770,8 +753,6 @@ _ALWAYS = frozenset(
         "provider-config-helm",
         "gateway",
         "gateway-class",
-        "usage-gateway-class-by-gateway",
-        "usage-envoy-gateway-by-gateway-class",
     }
 )
 
@@ -786,9 +767,6 @@ _COMMON = frozenset(
         "gaie-crds-inferencepools.inference.networking.x-k8s.io",
         "gateway-namespace",
         "gateway-proxy",
-        "usage-ai-gateway-crds-by-ai-gateway",
-        "usage-cert-manager-by-envoy-gateway",
-        "usage-gateway-namespace-by-gateway-proxy",
     }
 )
 
@@ -811,10 +789,6 @@ _DYNAMO = frozenset(
         "modelexpress-server-rolebinding",
         "modelexpress-server-sa",
         "modelexpress-server-svc",
-        "usage-kai-scheduler-by-kai-queue",
-        "usage-kai-scheduler-by-kai-queue-root",
-        "usage-modelexpress-crds-modelcacheentries.modelexpress.nvidia.com-by-modelexpress-server",
-        "usage-modelexpress-crds-modelmetadatas.modelexpress.nvidia.com-by-modelexpress-server",
     }
 )
 
@@ -830,17 +804,6 @@ _EKS = frozenset(
         "nvsentinel",
         "prometheus-adapter",
         "prometheus-operator-crds",
-        "usage-cert-manager-by-gpu-operator",
-        "usage-cert-manager-by-nvsentinel",
-        "usage-gpu-operator-by-nvidia-dra-driver-gpu",
-        "usage-gpu-operator-by-nvsentinel",
-        "usage-kube-prometheus-stack-by-gpu-operator",
-        "usage-kube-prometheus-stack-by-k8s-ephemeral-storage-metrics",
-        "usage-kube-prometheus-stack-by-prometheus-adapter",
-        "usage-node-feature-discovery-by-gpu-operator",
-        "usage-prometheus-operator-crds-by-k8s-ephemeral-storage-metrics",
-        "usage-prometheus-operator-crds-by-kube-prometheus-stack",
-        "usage-prometheus-operator-crds-by-nvsentinel",
     }
 )
 
@@ -848,7 +811,6 @@ _EKS = frozenset(
 _AKS = _EKS | frozenset(
     {
         "gpu-operator-manifests",
-        "usage-gpu-operator-by-gpu-operator-manifests",
     }
 )
 
@@ -859,8 +821,6 @@ _GKE = _EKS | frozenset(
     {
         "gpu-operator-pre-manifests-gpu-operator",
         "gpu-operator-pre-manifests-aicr-gke-critical-pods",
-        "usage-gpu-operator-pre-manifests-gpu-operator-by-gpu-operator",
-        "usage-gpu-operator-pre-manifests-aicr-gke-critical-pods-by-gpu-operator",
     }
 )
 
@@ -877,13 +837,73 @@ _HAND_WRITTEN = frozenset(
 # Vultr half carries no node-feature-discovery of its own.
 _VULTR = _HAND_WRITTEN - frozenset({"node-feature-discovery"})
 
+# The ordering edges between components, per half of the join, as the
+# old teardown Usages named them: (resource, what it waits for). Edges
+# to the ProviderConfigs aren't listed - every composed resource has
+# exactly one, which the test checks mechanically.
+
+_ALWAYS_EDGES = frozenset(
+    {
+        ("gateway", "gateway-class"),
+        ("gateway-class", "envoy-gateway"),
+    }
+)
+
+_COMMON_EDGES = frozenset(
+    {
+        ("ai-gateway", "ai-gateway-crds"),
+        ("envoy-gateway", "cert-manager"),
+        ("gateway-proxy", "gateway-namespace"),
+    }
+)
+
+_STANDARD_EDGES: frozenset[tuple[str, str]] = frozenset()
+
+_DYNAMO_EDGES = frozenset(
+    {
+        ("kai-queue", "kai-scheduler"),
+        ("kai-queue-root", "kai-scheduler"),
+        ("modelexpress-server", "modelexpress-crds-modelcacheentries.modelexpress.nvidia.com"),
+        ("modelexpress-server", "modelexpress-crds-modelmetadatas.modelexpress.nvidia.com"),
+    }
+)
+
+_EKS_EDGES = frozenset(
+    {
+        ("gpu-operator", "cert-manager"),
+        ("gpu-operator", "kube-prometheus-stack"),
+        ("gpu-operator", "node-feature-discovery"),
+        ("k8s-ephemeral-storage-metrics", "kube-prometheus-stack"),
+        ("k8s-ephemeral-storage-metrics", "prometheus-operator-crds"),
+        ("kube-prometheus-stack", "prometheus-operator-crds"),
+        ("nvidia-dra-driver-gpu", "gpu-operator"),
+        ("nvsentinel", "cert-manager"),
+        ("nvsentinel", "gpu-operator"),
+        ("nvsentinel", "prometheus-operator-crds"),
+        ("prometheus-adapter", "kube-prometheus-stack"),
+    }
+)
+
+_AKS_EDGES = _EKS_EDGES | frozenset({("gpu-operator-manifests", "gpu-operator")})
+
+_GKE_EDGES = _EKS_EDGES | frozenset(
+    {
+        ("gpu-operator", "gpu-operator-pre-manifests-gpu-operator"),
+        ("gpu-operator", "gpu-operator-pre-manifests-aicr-gke-critical-pods"),
+    }
+)
+
+# The hand-written half declares no edges of its own: every component
+# it carries is a leaf of the cloud halves' graphs.
+_HAND_WRITTEN_EDGES: frozenset[tuple[str, str]] = frozenset()
+
 _INVENTORY = {
-    "EKS": _EKS,
-    "AKS": _AKS,
-    "GKE": _GKE,
-    "Nebius": _HAND_WRITTEN,
-    "Vultr": _VULTR,
-    "Existing": _HAND_WRITTEN,
+    "EKS": (_EKS, _EKS_EDGES),
+    "AKS": (_AKS, _AKS_EDGES),
+    "GKE": (_GKE, _GKE_EDGES),
+    "Nebius": (_HAND_WRITTEN, _HAND_WRITTEN_EDGES),
+    "Vultr": (_VULTR, _HAND_WRITTEN_EDGES),
+    "Existing": (_HAND_WRITTEN, _HAND_WRITTEN_EDGES),
 }
 
 
@@ -895,20 +915,28 @@ class TestKeyInventory(unittest.IsolatedAsyncioTestCase):
         cls.runner = fn.FunctionRunner()
 
     async def test_composed_resource_keys(self) -> None:
-        for cloud, cloud_keys in _INVENTORY.items():
-            for stack, stack_keys in (("Standard", _STANDARD), ("Dynamo", _DYNAMO)):
+        for cloud, (cloud_keys, cloud_edges) in _INVENTORY.items():
+            for stack, stack_keys, stack_edges in (
+                ("Standard", _STANDARD, _STANDARD_EDGES),
+                ("Dynamo", _DYNAMO, _DYNAMO_EDGES),
+            ):
                 with self.subTest(cloud=cloud, stack=stack):
                     expected = _ALWAYS | _COMMON | cloud_keys | stack_keys
-                    # Observe every expected key Ready so the depends_on
-                    # install gate opens and the full stack renders; a
-                    # key the function doesn't render still fails the
-                    # comparison.
-                    observed = _observed_pcs()
-                    for key in expected:
-                        observed[key] = fnv1.Resource(
-                            resource=resource.dict_to_struct(
-                                {"status": {"conditions": [{"type": "Ready", "status": "True"}]}}
-                            )
-                        )
-                    got = await self.runner.RunFunction(_request(cloud, stack, observed=observed), None)
+                    # Every component composes on the first pass now, so
+                    # nothing needs observing to see the full key set.
+                    got = await self.runner.RunFunction(_request(cloud, stack), None)
                     self.assertEqual(expected, set(got.desired.resources.keys()))
+
+                    pcs = {"provider-config-kubernetes", "provider-config-helm"}
+                    edges = {(d.resource, d.composed_resource) for d in got.dependencies.items}
+
+                    self.assertEqual(
+                        _ALWAYS_EDGES | _COMMON_EDGES | cloud_edges | stack_edges,
+                        {e for e in edges if e[1] not in pcs},
+                    )
+                    # Every composed resource but the ProviderConfigs
+                    # themselves waits on exactly one of them.
+                    self.assertEqual(
+                        expected - pcs,
+                        {resource_name for resource_name, depends_on in edges if depends_on in pcs},
+                    )

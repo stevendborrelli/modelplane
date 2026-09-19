@@ -334,20 +334,29 @@ needs for its webhooks is AICR's. An edge naming a component the join didn't
 produce is an error. That catches an allowlist which dropped something another
 component needs at build time rather than on a cluster.
 
-`depends_on` drives teardown. Crossplane applies composed resources
-concurrently, so today the function hand-writes `Usage`s to sequence deletion: a
-`Gateway` before its `GatewayClass` before Envoy Gateway, and the kai-scheduler
-release after both `Queue`s. The function derives those from `depends_on` rather
-than naming components in Python.
+`depends_on` drives ordering in both directions. Crossplane applies composed
+resources concurrently unless a function says otherwise, so the function returns
+one dependency per edge on its response and lets Crossplane sequence the work: a
+`Gateway` after its `GatewayClass` after Envoy Gateway on the way up, and the
+reverse on the way down, with the kai-scheduler release outliving both `Queue`s.
+The function derives those from `depends_on` rather than naming components in
+Python, and declares them rather than enacting them — it composes every
+component on every pass.
 
-It doesn't order installs. They stay concurrent and rely on Helm retrying, as
-they do today, so AICR's install sequence is an input the generator discards.
-Today's components tolerate arriving in any order. The one new edge is AICR's
-DRA driver depending on GPU Operator, which nothing has had to converge under
-retry alone — verifying it does is part of landing the generated stack. If it
-turns out not to, `depends_on` already carries the information ordering would
-need; the missing piece would be a `Release` that reports ready only once its
-workloads run.
+So installs are ordered too, and AICR's install sequence is an input the
+generator can honor rather than discard. A component is created once every
+component it depends on reports Ready, which for a `Release` means Helm deployed
+it — deploy-order, not health-order, unless the entry sets `wait`. The edge that
+motivated this is AICR's DRA driver depending on GPU Operator, which nothing had
+to converge under Helm retry alone.
+
+Every component also depends on the `ProviderConfig` it targets, which is what
+keeps first creation from racing a `ProviderConfig` Crossplane has yet to
+persist, and holds that `ProviderConfig` through teardown until nothing points at
+it. That replaces both the hand-rolled observed-check gating and the `Usage`s a
+separate `compose-usages` step used to compose. One caveat came with it: a
+`Usage` refuses an out-of-band `kubectl delete` of a `ProviderConfig`, and
+dependencies only order the deletes Crossplane itself performs.
 
 `key` and `release` are Modelplane's, not AICR's, so a component's identity
 survives whatever upstream renames. The `mp-` prefix keeps chart-derived names
