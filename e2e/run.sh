@@ -25,6 +25,22 @@ METALLB_URL=https://raw.githubusercontent.com/metallb/metallb/v0.14.8/config/man
 CURL_IMAGE=curlimages/curl@sha256:7c12af72ceb38b7432ab85e1a265cff6ae58e06f95539d539b654f2cfa64bb13
 ROOT="$(git rev-parse --show-toplevel)"
 
+# Optional: run against a locally built Crossplane instead of the pinned
+# release, for a feature that hasn't shipped yet. `crossplane project run`
+# installs Crossplane from charts.crossplane.io by version, so a branch build
+# can't come in through the CLI; set CROSSPLANE_IMAGE to an image already in
+# the host's Docker daemon and this loads it into the control-plane cluster
+# and repoints the Deployments after the chart lands. CROSSPLANE_ARGS appends
+# arguments to the core container, which is how an alpha feature gets turned
+# on. Leave both unset and the run is exactly what CI does.
+#
+#   cd ../crossplane && ./nix.sh run .#stream-image | docker load
+#   CROSSPLANE_IMAGE=crossplane/crossplane:<tag> \
+#     CROSSPLANE_ARGS=--enable-composed-resource-ordering \
+#     nix run .#e2e -- --verify
+CROSSPLANE_IMAGE="${CROSSPLANE_IMAGE:-}"
+CROSSPLANE_ARGS="${CROSSPLANE_ARGS:-}"
+
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 
 if [ "${1:-}" = "--clean" ]; then
@@ -150,6 +166,53 @@ crossplane project run \
 	--control-plane-name "$CP" --cluster-admin --timeout 25m \
 	--init-resources "$ROOT/e2e/lean-control-plane.yaml" \
 	--crossplane-version=2.4.0
+
+# Before anything Modelplane-shaped exists, so no composition ever runs
+# against the released Crossplane the chart just installed. The image needs no
+# CRD changes alongside it today; if a local build ever adds or changes one,
+# apply its cluster/crds here too.
+if [ -n "$CROSSPLANE_IMAGE" ] || [ -n "$CROSSPLANE_ARGS" ]; then
+	if [ -n "$CROSSPLANE_IMAGE" ]; then
+		log "Swapping in local Crossplane image $CROSSPLANE_IMAGE"
+		kind load docker-image "$CROSSPLANE_IMAGE" --name "$CP"
+		# Patch by container name rather than index: both Deployments carry an
+		# init container and a main container, and both run the same image.
+		# IfNotPresent so the kubelet uses the loaded image instead of trying
+		# to pull a tag that exists nowhere.
+		for d in crossplane crossplane-rbac-manager; do
+			kubectl --context "$cpctx" -n crossplane-system patch deployment "$d" -p "$(
+				cat <<-PATCH
+					spec:
+					  template:
+					    spec:
+					      initContainers:
+					      - name: crossplane-init
+					        image: $CROSSPLANE_IMAGE
+					        imagePullPolicy: IfNotPresent
+					      containers:
+					      - name: crossplane
+					        image: $CROSSPLANE_IMAGE
+					        imagePullPolicy: IfNotPresent
+				PATCH
+			)"
+		done
+	fi
+
+	if [ -n "$CROSSPLANE_ARGS" ]; then
+		# Appended one at a time with a JSON patch: a strategic merge replaces
+		# the whole args list, which would drop the chart's `core start`.
+		log "Adding Crossplane args: $CROSSPLANE_ARGS"
+		read -ra extra_args <<<"$CROSSPLANE_ARGS"
+		for a in "${extra_args[@]}"; do
+			kubectl --context "$cpctx" -n crossplane-system patch deployment crossplane --type=json \
+				-p "[{\"op\": \"add\", \"path\": \"/spec/template/spec/containers/0/args/-\", \"value\": \"$a\"}]"
+		done
+	fi
+
+	for d in crossplane crossplane-rbac-manager; do
+		kubectl --context "$cpctx" -n crossplane-system rollout status "deployment/$d" --timeout=5m
+	done
+fi
 
 # Config healthy. Finish the setup the getting-started flow does by hand (as the
 # nix run app now does too, PR #375): apply the RBAC prerequisites, then point

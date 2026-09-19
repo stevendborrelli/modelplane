@@ -98,6 +98,34 @@ nix run .#e2e -- --verify  # same, then wait for readiness and assert a live 200
 nix run .#e2e -- --clean   # tear both clusters down
 ```
 
+### Running against a local Crossplane build
+
+`crossplane project run` installs Crossplane from `charts.crossplane.io` by
+version, so a build carrying an unreleased feature can't come in through the
+CLI. Set `CROSSPLANE_IMAGE` to an image already in your Docker daemon and
+`run.sh` loads it into the control-plane cluster and repoints both Crossplane
+Deployments once the chart lands — before any Modelplane manifest is applied,
+so no composition ever runs against the released binary:
+
+```bash
+cd ../crossplane && ./nix.sh run .#stream-image | docker load  # prints the tag
+CROSSPLANE_IMAGE=crossplane/crossplane:<tag> \
+  CROSSPLANE_ARGS=--enable-composed-resource-ordering \
+  nix run .#e2e -- --verify
+```
+
+`CROSSPLANE_ARGS` appends arguments to the core container, which is how an
+alpha feature gets turned on — composed-resource ordering is off unless
+`--enable-composed-resource-ordering` is passed, and the serving stack's
+function fails the pipeline outright when Crossplane doesn't advertise the
+capability. Unset both and the run is exactly what CI does. This swaps the
+image and the args only; a local build that also changes CRDs needs its
+`cluster/crds` applied alongside.
+
+The composition functions are a separate matter: they're built from
+`uv.lock`, so the SDK they carry is whatever the lockfile resolves — see the
+`[tool.uv.sources]` note in the root `pyproject.toml`.
+
 `crossplane project run` installs the config and applies the resources, then
 returns; the serving-stack install and model rollout reconcile in the background.
 So wait for the `ModelService` to publish an address before curling. That address
