@@ -32,13 +32,11 @@ import pathlib
 
 import grpc
 import yaml
-from crossplane.function import logging, resource, response
+from crossplane.function import logging, request, resource, response
 from crossplane.function.proto.v1 import run_function_pb2 as fnv1
 from crossplane.function.proto.v1 import run_function_pb2_grpc as grpcv1
 from models.ai.modelplane.inferencegateway import v1alpha1
 from models.io.crossplane.m.helm.release import v1beta1 as helmv1beta1
-from models.io.crossplane.protection.clusterusage import v1beta1 as clusterusagev1beta1
-from models.io.crossplane.protection.usage import v1beta1 as usagev1beta1
 from models.io.k8s.apimachinery.pkg.apis.meta import v1 as metav1
 
 _HERE = pathlib.Path(__file__).parent
@@ -80,10 +78,6 @@ _NAMESPACE_SYSTEM = "modelplane-system"
 # and the MetalLB IP pool / L2Advertisement name.
 _GATEWAY_NAME = "modelplane"
 
-# Label key for Helm releases, used in Usage selectors to protect
-# ProviderConfigs from premature deletion.
-_LABEL_RELEASE = "modelplane.ai/release"
-
 # Traefik Helm chart coordinates.
 _TRAEFIK_CHART = "traefik"
 _TRAEFIK_REPO = "https://traefik.github.io/charts"
@@ -115,7 +109,6 @@ def _helm_release(
     namespace: str,
     provider_config: str,
     values: dict | None = None,
-    labels: dict | None = None,
     metadata_namespace: str | None = None,
 ) -> helmv1beta1.Release:
     """Build a Helm Release targeting a remote (or local) cluster.
@@ -127,15 +120,12 @@ def _helm_release(
         namespace: The namespace to install the chart into on the target cluster.
         provider_config: Name of the ProviderConfig to use.
         values: Optional Helm values dict.
-        labels: Optional labels for the Release metadata.
         metadata_namespace: Optional namespace for the Release resource itself.
             Set this explicitly when composing from a cluster-scoped XR, since
             cluster-scoped XRs don't auto-populate namespace on composed
             namespaced resources.
     """
-    md = None
-    if labels or metadata_namespace:
-        md = metav1.ObjectMeta(namespace=metadata_namespace, labels=labels)
+    md = metav1.ObjectMeta(namespace=metadata_namespace) if metadata_namespace else None
 
     release = helmv1beta1.Release(
         metadata=md,
@@ -174,6 +164,20 @@ class FunctionRunner(grpcv1.FunctionRunnerServiceServicer):
         log.info("Running function")
 
         rsp = response.to(req)
+
+        # This composition declares its ordering rather than enacting it: it
+        # composes every resource on every pass and lets Crossplane sequence
+        # them. A Crossplane that ignores dependencies would install Traefik
+        # before the Gateway API CRDs exist and uninstall it before the
+        # GatewayClass it holds a finalizer on, wedging deletion. Fail the
+        # pipeline instead.
+        if not request.has_capability(req, fnv1.CAPABILITY_DEPENDENCIES):
+            response.fatal(
+                rsp,
+                "Crossplane does not support composed resource dependencies, "
+                "which this composition requires to order the gateway",
+            )
+            return rsp
         c = Composer(req, rsp)
         c.compose()
         return rsp
@@ -191,14 +195,21 @@ class Composer:
         self.compose_metallb()
         self.compose_traefik()
         self.compose_gateway()
-        self.compose_gateway_usages()
+        self.compose_dependencies()
         self.write_status()
         self.derive_conditions()
 
     def compose_provider_config(self) -> None:
         """Namespaced ProviderConfig for provider-helm targeting the control
         plane using the pod's own service account (in-cluster identity).
-        Namespaced (not ClusterProviderConfig) so the Usage can protect it."""
+        Namespaced (not ClusterProviderConfig) so it can be named directly by
+        the resources that depend on it.
+
+        Ready only once observed. Everything that targets this ProviderConfig
+        depends on it, so its readiness is what releases the rest of the
+        graph: calling it ready while Crossplane has yet to persist it would
+        let provider-helm act on Releases pointing at a ProviderConfig that
+        doesn't exist."""
         resource.update(
             self.rsp.desired.resources["provider-config-helm"],
             {
@@ -208,7 +219,8 @@ class Composer:
                 "spec": {"credentials": {"source": "InjectedIdentity"}},
             },
         )
-        self.rsp.desired.resources["provider-config-helm"].ready = fnv1.READY_TRUE
+        if "provider-config-helm" in self.req.observed.resources:
+            self.rsp.desired.resources["provider-config-helm"].ready = fnv1.READY_TRUE
 
     def compose_gateway_api_crds(self) -> None:
         """Compose the Gateway API CRDs onto the control plane.
@@ -220,14 +232,6 @@ class Composer:
             resource.update(self.rsp.desired.resources[key], doc)
             if resource.get_condition(self.req.observed.resources.get(key), "Established").status == "True":
                 self.rsp.desired.resources[key].ready = fnv1.READY_TRUE
-
-    def gateway_api_crds_ready(self) -> bool:
-        """True once every composed Gateway API CRD is Established, so Traefik
-        can render its resources and watch the Gateway API types."""
-        return all(
-            resource.get_condition(self.req.observed.resources.get(_crd_key(doc)), "Established").status == "True"
-            for doc in _GATEWAY_API_CRDS
-        )
 
     def compose_metallb(self) -> None:
         """Optional MetalLB for kind/bare-metal clusters that don't have a
@@ -248,26 +252,17 @@ class Composer:
         )
         self.rsp.desired.resources["namespace-metallb"].ready = fnv1.READY_TRUE
 
-        pc_observed = "provider-config-helm" in self.req.observed.resources
-        if pc_observed or "metallb" in self.req.observed.resources:
-            resource.update(
-                self.rsp.desired.resources["metallb"],
-                _helm_release(
-                    chart="metallb",
-                    repo="https://metallb.github.io/metallb",
-                    version="0.14.9",
-                    namespace=metallb_ns,
-                    provider_config=_PC_NAME,
-                    labels={_LABEL_RELEASE: "metallb"},
-                    metadata_namespace=_NAMESPACE_SYSTEM,
-                ),
-            )
-            self.compose_pc_usage("metallb")
-
-        # Gate the IPAddressPool and L2Advertisement on MetalLB being ready.
-        metallb_ready = resource.get_condition(self.req.observed.resources.get("metallb"), "Ready").status == "True"
-        if not (metallb_ready or "metallb-pool" in self.req.observed.resources):
-            return
+        resource.update(
+            self.rsp.desired.resources["metallb"],
+            _helm_release(
+                chart="metallb",
+                repo="https://metallb.github.io/metallb",
+                version="0.14.9",
+                namespace=metallb_ns,
+                provider_config=_PC_NAME,
+                metadata_namespace=_NAMESPACE_SYSTEM,
+            ),
+        )
 
         resource.update(
             self.rsp.desired.resources["metallb-pool"],
@@ -292,15 +287,13 @@ class Composer:
         self.rsp.desired.resources["metallb-l2"].ready = fnv1.READY_TRUE
 
     def compose_traefik(self) -> None:
-        """Compose Traefik Proxy. Gated on the ProviderConfig being observed
-        (so provider-helm can act on the Release) and the Gateway API CRDs
-        being established (so the release can render its resources and Traefik
-        can watch the Gateway API types without erroring)."""
-        pc_observed = "provider-config-helm" in self.req.observed.resources
-        gate = pc_observed and self.gateway_api_crds_ready()
-        if not (gate or "traefik" in self.req.observed.resources):
-            return
+        """Compose Traefik Proxy.
 
+        It depends on the ProviderConfig, so provider-helm can act on the
+        Release, and on the Gateway API CRDs, so the release can render its
+        resources and Traefik can watch the Gateway API types without
+        erroring. Both are declared in compose_dependencies rather than
+        withheld here."""
         resource.update(
             self.rsp.desired.resources["traefik"],
             _helm_release(
@@ -335,54 +328,52 @@ class Composer:
                     # composes its own GatewayClass instead.
                     "gatewayClass": {"enabled": False},
                 },
-                labels={_LABEL_RELEASE: "traefik"},
                 metadata_namespace=_NAMESPACE_SYSTEM,
             ),
         )
-        self.compose_pc_usage("traefik")
 
     def compose_gateway(self) -> None:
-        """Compose GatewayClass and Gateway. Gated on Traefik being ready."""
-        traefik_ready = resource.get_condition(self.req.observed.resources.get("traefik"), "Ready").status == "True"
+        """Compose GatewayClass and Gateway.
 
-        if traefik_ready or "gateway-class" in self.req.observed.resources:
-            resource.update(
-                self.rsp.desired.resources["gateway-class"],
-                {
-                    "apiVersion": "gateway.networking.k8s.io/v1",
-                    "kind": "GatewayClass",
-                    "metadata": {"name": _TRAEFIK_GATEWAY_CLASS},
-                    "spec": {
-                        "controllerName": _TRAEFIK_CONTROLLER_NAME,
-                    },
+        Both wait on Traefik through compose_dependencies: the GatewayClass on
+        the release that runs its controller, and the Gateway on the
+        GatewayClass."""
+        resource.update(
+            self.rsp.desired.resources["gateway-class"],
+            {
+                "apiVersion": "gateway.networking.k8s.io/v1",
+                "kind": "GatewayClass",
+                "metadata": {"name": _TRAEFIK_GATEWAY_CLASS},
+                "spec": {
+                    "controllerName": _TRAEFIK_CONTROLLER_NAME,
                 },
-            )
+            },
+        )
 
-        if traefik_ready or "gateway" in self.req.observed.resources:
-            # The Gateway listener port must match Traefik's "web"
-            # entryPoint internal port, not the Service's exposed port.
-            resource.update(
-                self.rsp.desired.resources["gateway"],
-                {
-                    "apiVersion": "gateway.networking.k8s.io/v1",
-                    "kind": "Gateway",
-                    "metadata": {
-                        "name": _GATEWAY_NAME,
-                        "namespace": _NAMESPACE_SYSTEM,
-                    },
-                    "spec": {
-                        "gatewayClassName": _TRAEFIK_GATEWAY_CLASS,
-                        "listeners": [
-                            {
-                                "name": "web",
-                                "protocol": "HTTP",
-                                "port": _TRAEFIK_WEB_ENTRYPOINT_PORT,
-                                "allowedRoutes": {"namespaces": {"from": "All"}},
-                            }
-                        ],
-                    },
+        # The Gateway listener port must match Traefik's "web" entryPoint
+        # internal port, not the Service's exposed port.
+        resource.update(
+            self.rsp.desired.resources["gateway"],
+            {
+                "apiVersion": "gateway.networking.k8s.io/v1",
+                "kind": "Gateway",
+                "metadata": {
+                    "name": _GATEWAY_NAME,
+                    "namespace": _NAMESPACE_SYSTEM,
                 },
-            )
+                "spec": {
+                    "gatewayClassName": _TRAEFIK_GATEWAY_CLASS,
+                    "listeners": [
+                        {
+                            "name": "web",
+                            "protocol": "HTTP",
+                            "port": _TRAEFIK_WEB_ENTRYPOINT_PORT,
+                            "allowedRoutes": {"namespaces": {"from": "All"}},
+                        }
+                    ],
+                },
+            },
+        )
 
     def write_status(self) -> None:
         """Surface the gateway's external address. Only the address — no
@@ -416,9 +407,6 @@ class Composer:
         traefik_ready = resource.get_condition(self.req.observed.resources.get("traefik"), "Ready").status == "True"
         if traefik_ready:
             self.rsp.desired.resources["traefik"].ready = fnv1.READY_TRUE
-            # Transition: Traefik just became ready.
-            if "gateway" not in self.req.observed.resources:
-                response.normal(self.rsp, "Traefik ready, composing Gateway")
 
         # ControllerReady condition.
         response.set_conditions(
@@ -439,98 +427,37 @@ class Composer:
         if resource.get_condition(self.req.observed.resources.get("gateway"), "Accepted").status == "True":
             self.rsp.desired.resources["gateway"].ready = fnv1.READY_TRUE
 
-    def compose_pc_usage(self, release_key: str) -> None:
-        """Compose a Usage protecting the ProviderConfig from deletion until
-        the given Helm release is gone."""
-        resource.update(
-            self.rsp.desired.resources[f"usage-pc-by-{release_key}"],
-            usagev1beta1.Usage(
-                metadata=metav1.ObjectMeta(namespace=_NAMESPACE_SYSTEM),
-                spec=usagev1beta1.Spec(
-                    of=usagev1beta1.Of(
-                        apiVersion="helm.m.crossplane.io/v1beta1",
-                        kind="ProviderConfig",
-                        resourceRef=usagev1beta1.ResourceRefModel(name=_PC_NAME),
-                    ),
-                    by=usagev1beta1.By(
-                        apiVersion="helm.m.crossplane.io/v1beta1",
-                        kind="Release",
-                        resourceSelector=usagev1beta1.ResourceSelector(
-                            matchControllerRef=True,
-                            matchLabels={_LABEL_RELEASE: release_key},
-                        ),
-                    ),
-                    replayDeletion=True,
-                ),
-            ),
-        )
-        self.rsp.desired.resources[f"usage-pc-by-{release_key}"].ready = fnv1.READY_TRUE
+    def compose_dependencies(self) -> None:
+        """Declare the order Crossplane creates and deletes these in.
 
-    def compose_gateway_usages(self) -> None:
-        """Compose Usages so the Traefik release outlives the GatewayClass and
-        Gateway it controls.
+        Every edge constrains both directions at once: a resource is created
+        only once what it depends on reports Ready, and what it depends on is
+        deleted only once the resource is gone.
 
-        On XR deletion every composed resource is deleted concurrently. The
-        Traefik controller sets a finalizer on the GatewayClass (and Gateway);
-        if the release (and thus the controller) is uninstalled first, that
-        finalizer is never cleared and deletion wedges. These Usages hold the
-        release until the GatewayClass and Gateway are gone, so the controller
-        is still running to clear their finalizers.
+        Everything provider-helm acts on depends on the ProviderConfig, which
+        keeps a Release from being created against a ProviderConfig Crossplane
+        hasn't persisted and holds that ProviderConfig through teardown.
+        Traefik additionally depends on the Gateway API CRDs, so its release
+        can render Gateway API resources and watch those types.
 
-        The GatewayClass is cluster-scoped, so it needs a ClusterUsage; the
-        Gateway is namespaced. Both are gated on Traefik being composed this
-        pass. The Usages select the Release by label rather than referencing
-        it directly, so they don't need it to exist yet; composing them
-        alongside the Release puts deletion-order protection in place from the
-        moment the Release is first emitted as desired state."""
-        if "traefik" not in self.rsp.desired.resources:
-            return
+        The gateway chain is the teardown case that matters. Traefik's
+        controller sets a finalizer on the GatewayClass and the Gateway; if
+        the release goes first, nothing is left to clear those finalizers and
+        deletion wedges. Gateway -> GatewayClass -> Traefik tears down in that
+        order, and brings them up in reverse, which is also the order they
+        make sense in: a Gateway naming a GatewayClass no controller has
+        accepted does nothing.
+        """
+        for key in ("metallb", "traefik"):
+            if key in self.rsp.desired.resources:
+                response.add_dependency(self.rsp, key, "provider-config-helm")
 
-        release_by = clusterusagev1beta1.By(
-            apiVersion="helm.m.crossplane.io/v1beta1",
-            kind="Release",
-            resourceSelector=clusterusagev1beta1.ResourceSelector(
-                matchControllerRef=True,
-                matchLabels={_LABEL_RELEASE: "traefik"},
-            ),
-        )
+        if "metallb" in self.rsp.desired.resources:
+            for key in ("metallb-pool", "metallb-l2"):
+                response.add_dependency(self.rsp, key, "metallb")
 
-        resource.update(
-            self.rsp.desired.resources["usage-gateway-class-by-traefik"],
-            clusterusagev1beta1.ClusterUsage(
-                spec=clusterusagev1beta1.Spec(
-                    of=clusterusagev1beta1.Of(
-                        apiVersion="gateway.networking.k8s.io/v1",
-                        kind="GatewayClass",
-                        resourceRef=clusterusagev1beta1.ResourceRef(name=_TRAEFIK_GATEWAY_CLASS),
-                    ),
-                    by=release_by,
-                    replayDeletion=True,
-                ),
-            ),
-        )
-        self.rsp.desired.resources["usage-gateway-class-by-traefik"].ready = fnv1.READY_TRUE
+        for doc in _GATEWAY_API_CRDS:
+            response.add_dependency(self.rsp, "traefik", _crd_key(doc))
 
-        resource.update(
-            self.rsp.desired.resources["usage-gateway-by-traefik"],
-            usagev1beta1.Usage(
-                metadata=metav1.ObjectMeta(namespace=_NAMESPACE_SYSTEM),
-                spec=usagev1beta1.Spec(
-                    of=usagev1beta1.Of(
-                        apiVersion="gateway.networking.k8s.io/v1",
-                        kind="Gateway",
-                        resourceRef=usagev1beta1.ResourceRefModel(name=_GATEWAY_NAME),
-                    ),
-                    by=usagev1beta1.By(
-                        apiVersion="helm.m.crossplane.io/v1beta1",
-                        kind="Release",
-                        resourceSelector=usagev1beta1.ResourceSelector(
-                            matchControllerRef=True,
-                            matchLabels={_LABEL_RELEASE: "traefik"},
-                        ),
-                    ),
-                    replayDeletion=True,
-                ),
-            ),
-        )
-        self.rsp.desired.resources["usage-gateway-by-traefik"].ready = fnv1.READY_TRUE
+        response.add_dependency(self.rsp, "gateway-class", "traefik")
+        response.add_dependency(self.rsp, "gateway", "gateway-class")
