@@ -51,7 +51,6 @@ from models.io.crossplane.m.kubernetes.clusterproviderconfig import (
     v1alpha1 as k8scpcv1alpha1,
 )
 from models.io.crossplane.protection.clusterusage import v1beta1 as clusterusagev1beta1
-from models.io.crossplane.protection.usage import v1beta1 as usagev1beta1
 from models.io.k8s.apimachinery.pkg.apis.meta import v1 as metav1
 
 # Cluster source discriminator values from the XRD enum. The Literal
@@ -79,6 +78,14 @@ CONDITION_REASON_INVALID_NODE_POOL = "InvalidNodePool"
 
 # Composed resource key for the backend XR.
 BACKEND_RESOURCE_KEY = "serving-stack"
+
+# Requirement names for the Secrets a source: Existing cluster supplies. The
+# pipeline reads neither - it only passes their names on - but what reads them
+# must wait until they exist.
+_CLUSTER_PC_RESOURCE_KEY = "cluster-provider-config-kubernetes"
+
+_REQUIRED_KUBECONFIG = "cluster-kubeconfig"
+_REQUIRED_IDENTITY = "cluster-identity"
 
 # Composed resource key for the ClusterUsage that blocks the InferenceCluster's
 # deletion while ModelReplicas are scheduled to it.
@@ -189,6 +196,22 @@ class FunctionRunner(grpcv1.FunctionRunnerServiceServicer):
         log.info("Running function")
 
         rsp = response.to(req)
+
+        # This composition declares its ordering rather than enacting it. The
+        # cluster XR is composed before its activation policy has taken
+        # effect, and nothing sequences the serving stack against the cluster
+        # on teardown - both were gates and Usages until they became edges. A
+        # Crossplane that ignores dependencies would apply managed resources
+        # whose kinds aren't activated yet, and tear the cluster down under a
+        # live stack.
+        if not request.has_capability(req, fnv1.CAPABILITY_DEPENDENCIES):
+            response.fatal(
+                rsp,
+                "Crossplane does not support composed resource dependencies, "
+                "which this composition requires to order the cluster and its stack",
+            )
+            return rsp
+
         c = Composer(req, rsp)
         c.compose()
         return rsp
@@ -374,7 +397,12 @@ class Composer:
         self.compose_activation(_ACTIVATE_GCP)
         if self._activation_ready(_ACTIVATE_GCP) or "gke-cluster" in self.req.observed.resources:
             self.rsp.desired.resources["activation"].ready = fnv1.READY_TRUE
-            self.compose_gke_cluster(gke)
+
+        self.compose_gke_cluster(gke)
+        # The policy activates the cloud's managed resource kinds, so the
+        # cluster XR waits on it rather than being withheld until it reports
+        # activated.
+        response.add_dependency(self.rsp, "gke-cluster", "activation")
 
         gke_ready = resource.get_condition(self.req.observed.resources.get("gke-cluster"), "Ready").status == "True"
         kubeconfig_secret = self.observed_gke_secret(_SECRET_TYPE_KUBECONFIG)
@@ -393,7 +421,9 @@ class Composer:
         if backend_secrets or backend_exists:
             if backend_secrets:
                 self.compose_serving_stack(backend_secrets, CLUSTER_SOURCE_GKE)
-            self.compose_gke_usage()
+            # The backend outlives nothing; the cluster outlives it. This is
+            # the edge the usage-gke-by-backend Usage used to be.
+            response.add_dependency(self.rsp, BACKEND_RESOURCE_KEY, "gke-cluster")
 
         if gke_ready:
             self.rsp.desired.resources["gke-cluster"].ready = fnv1.READY_TRUE
@@ -421,7 +451,12 @@ class Composer:
         self.compose_activation(_ACTIVATE_AWS)
         if self._activation_ready(_ACTIVATE_AWS) or "eks-cluster" in self.req.observed.resources:
             self.rsp.desired.resources["activation"].ready = fnv1.READY_TRUE
-            self.compose_eks_cluster(eks)
+
+        self.compose_eks_cluster(eks)
+        # The policy activates the cloud's managed resource kinds, so the
+        # cluster XR waits on it rather than being withheld until it reports
+        # activated.
+        response.add_dependency(self.rsp, "eks-cluster", "activation")
 
         eks_ready = resource.get_condition(self.req.observed.resources.get("eks-cluster"), "Ready").status == "True"
         kubeconfig = self.observed_eks_secret(_SECRET_TYPE_KUBECONFIG)
@@ -434,7 +469,9 @@ class Composer:
         if backend_secrets or backend_exists:
             if backend_secrets:
                 self.compose_serving_stack(backend_secrets, CLUSTER_SOURCE_EKS)
-            self.compose_eks_usage()
+            # The backend outlives nothing; the cluster outlives it. This is
+            # the edge the usage-eks-by-backend Usage used to be.
+            response.add_dependency(self.rsp, BACKEND_RESOURCE_KEY, "eks-cluster")
 
         if eks_ready:
             self.rsp.desired.resources["eks-cluster"].ready = fnv1.READY_TRUE
@@ -460,7 +497,12 @@ class Composer:
         self.compose_activation(_ACTIVATE_AZURE)
         if self._activation_ready(_ACTIVATE_AZURE) or "aks-cluster" in self.req.observed.resources:
             self.rsp.desired.resources["activation"].ready = fnv1.READY_TRUE
-            self.compose_aks_cluster(aks)
+
+        self.compose_aks_cluster(aks)
+        # The policy activates the cloud's managed resource kinds, so the
+        # cluster XR waits on it rather than being withheld until it reports
+        # activated.
+        response.add_dependency(self.rsp, "aks-cluster", "activation")
 
         aks_ready = resource.get_condition(self.req.observed.resources.get("aks-cluster"), "Ready").status == "True"
         kubeconfig = self.observed_aks_secret(_SECRET_TYPE_KUBECONFIG)
@@ -473,7 +515,9 @@ class Composer:
         if backend_secrets or backend_exists:
             if backend_secrets:
                 self.compose_serving_stack(backend_secrets, CLUSTER_SOURCE_AKS)
-            self.compose_aks_usage()
+            # The backend outlives nothing; the cluster outlives it. This is
+            # the edge the usage-aks-by-backend Usage used to be.
+            response.add_dependency(self.rsp, BACKEND_RESOURCE_KEY, "aks-cluster")
 
         if aks_ready:
             self.rsp.desired.resources["aks-cluster"].ready = fnv1.READY_TRUE
@@ -501,7 +545,12 @@ class Composer:
         self.compose_activation(_ACTIVATE_NEBIUS)
         if self._activation_ready(_ACTIVATE_NEBIUS) or "nebius-cluster" in self.req.observed.resources:
             self.rsp.desired.resources["activation"].ready = fnv1.READY_TRUE
-            self.compose_nebius_cluster(nebius)
+
+        self.compose_nebius_cluster(nebius)
+        # The policy activates the cloud's managed resource kinds, so the
+        # cluster XR waits on it rather than being withheld until it reports
+        # activated.
+        response.add_dependency(self.rsp, "nebius-cluster", "activation")
 
         nebius_ready = (
             resource.get_condition(self.req.observed.resources.get("nebius-cluster"), "Ready").status == "True"
@@ -522,7 +571,9 @@ class Composer:
         if backend_secrets or backend_exists:
             if backend_secrets:
                 self.compose_serving_stack(backend_secrets, CLUSTER_SOURCE_NEBIUS)
-            self.compose_nebius_usage()
+            # The backend outlives nothing; the cluster outlives it. This is
+            # the edge the usage-nebius-by-backend Usage used to be.
+            response.add_dependency(self.rsp, BACKEND_RESOURCE_KEY, "nebius-cluster")
 
         if nebius_ready:
             self.rsp.desired.resources["nebius-cluster"].ready = fnv1.READY_TRUE
@@ -548,7 +599,12 @@ class Composer:
         self.compose_activation(_ACTIVATE_VULTR)
         if self._activation_ready(_ACTIVATE_VULTR) or "vultr-cluster" in self.req.observed.resources:
             self.rsp.desired.resources["activation"].ready = fnv1.READY_TRUE
-            self.compose_vultr_cluster(vultr)
+
+        self.compose_vultr_cluster(vultr)
+        # The policy activates the cloud's managed resource kinds, so the
+        # cluster XR waits on it rather than being withheld until it reports
+        # activated.
+        response.add_dependency(self.rsp, "vultr-cluster", "activation")
 
         vultr_ready = resource.get_condition(self.req.observed.resources.get("vultr-cluster"), "Ready").status == "True"
         kubeconfig = self.observed_vultr_secret(_SECRET_TYPE_KUBECONFIG)
@@ -561,7 +617,9 @@ class Composer:
         if backend_secrets or backend_exists:
             if backend_secrets:
                 self.compose_serving_stack(backend_secrets, CLUSTER_SOURCE_VULTR)
-            self.compose_vultr_usage()
+            # The backend outlives nothing; the cluster outlives it. This is
+            # the edge the usage-vultr-by-backend Usage used to be.
+            response.add_dependency(self.rsp, BACKEND_RESOURCE_KEY, "vultr-cluster")
 
         if vultr_ready:
             self.rsp.desired.resources["vultr-cluster"].ready = fnv1.READY_TRUE
@@ -580,6 +638,17 @@ class Composer:
 
         identity = existing.identitySecretRef
 
+        # These Secrets are the user's, not this pipeline's. Require them so
+        # Crossplane reports whether they exist, and make what names them wait
+        # until they do: provider-helm and provider-kubernetes both fail
+        # against a ProviderConfig whose Secret isn't there, and the serving
+        # stack builds its own ProviderConfigs from the same Secrets.
+        #
+        # This adds ordering without removing any gate, so a Crossplane that
+        # doesn't support dependencies behaves exactly as it does today - no
+        # capability check, unlike the compositions that gave up their gating.
+        self.require_existing_secrets(existing)
+
         self.compose_cluster_provider_config(
             existing.secretRef.name,
             existing.secretRef.key,
@@ -596,9 +665,56 @@ class Composer:
                 ssv1alpha1.Secret(type=identity.type or _IDENTITY_TYPE_GCP, name=identity.name, key=identity.key),
             )
         self.compose_serving_stack(backend_secrets, CLUSTER_SOURCE_EXISTING)
+        self.order_on_existing_secrets(existing)
 
         self.write_status(self.gpu_pools())
         self.derive_conditions(cluster_ready=True)
+
+    def require_existing_secrets(self, existing: v1alpha1.Existing) -> None:
+        """Declare the user-supplied Secrets a source: Existing cluster names.
+
+        Both live in modelplane-system, the namespace the ProviderConfig reads
+        them from.
+        """
+        response.require_resources(
+            self.rsp,
+            name=_REQUIRED_KUBECONFIG,
+            api_version="v1",
+            kind="Secret",
+            match_name=existing.secretRef.name,
+            namespace=_NAMESPACE_SYSTEM,
+        )
+
+        if existing.identitySecretRef:
+            response.require_resources(
+                self.rsp,
+                name=_REQUIRED_IDENTITY,
+                api_version="v1",
+                kind="Secret",
+                match_name=existing.identitySecretRef.name,
+                namespace=_NAMESPACE_SYSTEM,
+            )
+
+    def order_on_existing_secrets(self, existing: v1alpha1.Existing) -> None:
+        """Wait for the user's Secrets before composing what reads them.
+
+        The edges name the requirement rather than a resource inside it. A
+        requirement that matched nothing is a wait, which is what a Secret the
+        user hasn't created yet should be; naming a specific resource that
+        nothing matched is reported as a contradiction instead, because
+        waiting can't resolve it.
+
+        Required resources only order creation. Crossplane never deletes a
+        resource it didn't compose, so nothing here constrains teardown.
+        """
+        for key in (_CLUSTER_PC_RESOURCE_KEY, BACKEND_RESOURCE_KEY):
+            if key not in self.rsp.desired.resources:
+                continue
+
+            response.add_required_resource_dependency(self.rsp, key, _REQUIRED_KUBECONFIG)
+
+            if existing.identitySecretRef:
+                response.add_required_resource_dependency(self.rsp, key, _REQUIRED_IDENTITY)
 
     def compose_serving_stack(
         self,
@@ -670,10 +786,10 @@ class Composer:
                 ),
             )
         resource.update(
-            self.rsp.desired.resources["cluster-provider-config-kubernetes"],
+            self.rsp.desired.resources[_CLUSTER_PC_RESOURCE_KEY],
             cpc,
         )
-        self.rsp.desired.resources["cluster-provider-config-kubernetes"].ready = fnv1.READY_TRUE
+        self.rsp.desired.resources[_CLUSTER_PC_RESOURCE_KEY].ready = fnv1.READY_TRUE
 
     def write_status(self, gpu_pools: list[dict[str, object]]) -> None:
         """Write the InferenceCluster status."""
@@ -1009,29 +1125,6 @@ class Composer:
             ),
         )
 
-    def compose_nebius_usage(self) -> None:
-        """Block NebiusCluster deletion until the backend is deleted."""
-        resource.update(
-            self.rsp.desired.resources["usage-nebius-by-backend"],
-            usagev1beta1.Usage(
-                metadata=metav1.ObjectMeta(namespace=_NAMESPACE_SYSTEM),
-                spec=usagev1beta1.Spec(
-                    of=usagev1beta1.Of(
-                        apiVersion="infrastructure.modelplane.ai/v1alpha1",
-                        kind="NebiusCluster",
-                        resourceSelector=usagev1beta1.ResourceSelectorModel(matchControllerRef=True),
-                    ),
-                    by=usagev1beta1.By(
-                        apiVersion="infrastructure.modelplane.ai/v1alpha1",
-                        kind="ServingStack",
-                        resourceSelector=usagev1beta1.ResourceSelector(matchControllerRef=True),
-                    ),
-                    replayDeletion=True,
-                ),
-            ),
-        )
-        self.rsp.desired.resources["usage-nebius-by-backend"].ready = fnv1.READY_TRUE
-
     def resolve_nebius_backend_secrets(
         self, *, nebius_ready: bool, backend_exists: bool
     ) -> list[ssv1alpha1.Secret] | None:
@@ -1155,29 +1248,6 @@ class Composer:
             ),
         )
 
-    def compose_vultr_usage(self) -> None:
-        """Block VultrCluster deletion until the backend is deleted."""
-        resource.update(
-            self.rsp.desired.resources["usage-vultr-by-backend"],
-            usagev1beta1.Usage(
-                metadata=metav1.ObjectMeta(namespace=_NAMESPACE_SYSTEM),
-                spec=usagev1beta1.Spec(
-                    of=usagev1beta1.Of(
-                        apiVersion="infrastructure.modelplane.ai/v1alpha1",
-                        kind="VultrCluster",
-                        resourceSelector=usagev1beta1.ResourceSelectorModel(matchControllerRef=True),
-                    ),
-                    by=usagev1beta1.By(
-                        apiVersion="infrastructure.modelplane.ai/v1alpha1",
-                        kind="ServingStack",
-                        resourceSelector=usagev1beta1.ResourceSelector(matchControllerRef=True),
-                    ),
-                    replayDeletion=True,
-                ),
-            ),
-        )
-        self.rsp.desired.resources["usage-vultr-by-backend"].ready = fnv1.READY_TRUE
-
     def resolve_vultr_backend_secrets(
         self, *, vultr_ready: bool, backend_exists: bool
     ) -> list[ssv1alpha1.Secret] | None:
@@ -1216,29 +1286,6 @@ class Composer:
             return None
         return next((s for s in vultr_secrets if s.type == secret_type), None)
 
-    def compose_eks_usage(self) -> None:
-        """Block EKSCluster deletion until the backend is deleted."""
-        resource.update(
-            self.rsp.desired.resources["usage-eks-by-backend"],
-            usagev1beta1.Usage(
-                metadata=metav1.ObjectMeta(namespace=_NAMESPACE_SYSTEM),
-                spec=usagev1beta1.Spec(
-                    of=usagev1beta1.Of(
-                        apiVersion="infrastructure.modelplane.ai/v1alpha1",
-                        kind="EKSCluster",
-                        resourceSelector=usagev1beta1.ResourceSelectorModel(matchControllerRef=True),
-                    ),
-                    by=usagev1beta1.By(
-                        apiVersion="infrastructure.modelplane.ai/v1alpha1",
-                        kind="ServingStack",
-                        resourceSelector=usagev1beta1.ResourceSelector(matchControllerRef=True),
-                    ),
-                    replayDeletion=True,
-                ),
-            ),
-        )
-        self.rsp.desired.resources["usage-eks-by-backend"].ready = fnv1.READY_TRUE
-
     def resolve_eks_backend_secrets(self, *, eks_ready: bool, backend_exists: bool) -> list[ssv1alpha1.Secret] | None:
         """Resolve secrets for the backend from EKSCluster status. Falls
         back to the observed backend's spec.secrets if EKSCluster secrets
@@ -1275,29 +1322,6 @@ class Composer:
             return None
         return next((s for s in eks_secrets if s.type == secret_type), None)
 
-    def compose_aks_usage(self) -> None:
-        """Block AKSCluster deletion until the backend is deleted."""
-        resource.update(
-            self.rsp.desired.resources["usage-aks-by-backend"],
-            usagev1beta1.Usage(
-                metadata=metav1.ObjectMeta(namespace=_NAMESPACE_SYSTEM),
-                spec=usagev1beta1.Spec(
-                    of=usagev1beta1.Of(
-                        apiVersion="infrastructure.modelplane.ai/v1alpha1",
-                        kind="AKSCluster",
-                        resourceSelector=usagev1beta1.ResourceSelectorModel(matchControllerRef=True),
-                    ),
-                    by=usagev1beta1.By(
-                        apiVersion="infrastructure.modelplane.ai/v1alpha1",
-                        kind="ServingStack",
-                        resourceSelector=usagev1beta1.ResourceSelector(matchControllerRef=True),
-                    ),
-                    replayDeletion=True,
-                ),
-            ),
-        )
-        self.rsp.desired.resources["usage-aks-by-backend"].ready = fnv1.READY_TRUE
-
     def resolve_aks_backend_secrets(self, *, aks_ready: bool, backend_exists: bool) -> list[ssv1alpha1.Secret] | None:
         """Resolve secrets for the backend from AKSCluster status. Falls
         back to the observed backend's spec.secrets if AKSCluster secrets
@@ -1333,29 +1357,6 @@ class Composer:
         if not aks_secrets:
             return None
         return next((s for s in aks_secrets if s.type == secret_type), None)
-
-    def compose_gke_usage(self) -> None:
-        """Block GKECluster deletion until the backend is deleted."""
-        resource.update(
-            self.rsp.desired.resources["usage-gke-by-backend"],
-            usagev1beta1.Usage(
-                metadata=metav1.ObjectMeta(namespace=_NAMESPACE_SYSTEM),
-                spec=usagev1beta1.Spec(
-                    of=usagev1beta1.Of(
-                        apiVersion="infrastructure.modelplane.ai/v1alpha1",
-                        kind="GKECluster",
-                        resourceSelector=usagev1beta1.ResourceSelectorModel(matchControllerRef=True),
-                    ),
-                    by=usagev1beta1.By(
-                        apiVersion="infrastructure.modelplane.ai/v1alpha1",
-                        kind="ServingStack",
-                        resourceSelector=usagev1beta1.ResourceSelector(matchControllerRef=True),
-                    ),
-                    replayDeletion=True,
-                ),
-            ),
-        )
-        self.rsp.desired.resources["usage-gke-by-backend"].ready = fnv1.READY_TRUE
 
     def resolve_gke_backend_secrets(self, *, gke_ready: bool, backend_exists: bool) -> list[ssv1alpha1.Secret] | None:
         """Resolve secrets for the backend from GKECluster status. Falls

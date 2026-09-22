@@ -110,6 +110,72 @@ def _replica_item(name: str, namespace: str) -> fnv1.Resource:
     )
 
 
+def _wants_cloud_edges(want: fnv1.RunFunctionResponse) -> None:
+    """Add the edges a cloud path declares, and drop the Usage they replaced.
+
+    The cluster XR waits on the activation policy that makes its managed
+    resource kinds known, and the serving stack waits on the cluster - which
+    is what the usage-<cloud>-by-backend Usage used to say about teardown.
+
+    Derived from the want itself rather than passed in: the resources it
+    expects are what determine which edges the function emits.
+    """
+    for key in [k for k in want.desired.resources if k.startswith("usage-") and k.endswith("-by-backend")]:
+        del want.desired.resources[key]
+
+    cloud = next(
+        (k.removesuffix("-cluster") for k in sorted(want.desired.resources) if k.endswith("-cluster")),
+        None,
+    )
+    if cloud is None:
+        return
+
+    want.dependencies.items.append(fnv1.Dependency(resource=f"{cloud}-cluster", composed_resource="activation"))
+
+    if "serving-stack" in want.desired.resources:
+        want.dependencies.items.append(fnv1.Dependency(resource="serving-stack", composed_resource=f"{cloud}-cluster"))
+
+
+def _secret_selector(name: str) -> fnv1.ResourceSelector:
+    """The requirement for one user-supplied Secret in modelplane-system."""
+    return fnv1.ResourceSelector(
+        api_version="v1",
+        kind="Secret",
+        match_name=name,
+        namespace="modelplane-system",
+    )
+
+
+def _wants_existing_secrets(want: fnv1.RunFunctionResponse, *, identity: str | None = None) -> None:
+    """Add what a source: Existing cluster declares about the user's Secrets:
+    the requirements themselves, and an edge from each resource that names
+    them so it waits until they exist.
+
+    The edges name the requirement, not a resource inside it. A requirement
+    that matched nothing is a wait, which a Secret the user hasn't created
+    yet should be.
+    """
+    want.requirements.resources["cluster-kubeconfig"].CopyFrom(_secret_selector("my-kubeconfig"))
+    if identity:
+        want.requirements.resources["cluster-identity"].CopyFrom(_secret_selector(identity))
+
+    for key in ("cluster-provider-config-kubernetes", "serving-stack"):
+        want.dependencies.items.append(
+            fnv1.Dependency(
+                resource=key,
+                required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+            )
+        )
+
+        if identity:
+            want.dependencies.items.append(
+                fnv1.Dependency(
+                    resource=key,
+                    required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-identity"),
+                )
+            )
+
+
 def _guard_clusterusage() -> fnv1.Resource:
     """The reason-only ClusterUsage the guard composes for test-cluster."""
     return fnv1.Resource(
@@ -2582,6 +2648,13 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
             want.requirements.resources["model-replicas"].CopyFrom(_replicas_selector("test-cluster"))
 
         # The guard cases reuse case 1's request and response.
+        # Every source: Existing case declares the user's Secrets and waits
+        # for them. Applied here, once all three wants are built, so the
+        # derived replica-guard cases inherit it too.
+        _wants_existing_secrets(want1)
+        _wants_existing_secrets(want1b, identity="nebius-creds")
+        _wants_existing_secrets(want3)
+
         guard_cases = [
             Case(
                 "ModelReplicas scheduled to the cluster compose the deletion guard", *_replica_guard_case(req1, want1)
@@ -2758,6 +2831,32 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
         del req_blip.observed.resources["activation"]
         want_blip = copy.deepcopy(want6)
 
+        # The cluster XR is composed on every pass now, held back by its edge
+        # to the activation policy rather than withheld from desired state.
+        # It is the same XR the first-pass GKE case expects.
+        want_unactivated.desired.resources["gke-cluster"].CopyFrom(want2.desired.resources["gke-cluster"])
+
+        for _want in (
+            want2,
+            want_creds,
+            want4,
+            want5,
+            want6,
+            want7,
+            want8,
+            want9,
+            want10,
+            want11,
+            want12,
+            want13,
+            want14,
+            want_creds_vultr,
+            want15,
+            want_unactivated,
+            want_blip,
+        ):
+            _wants_cloud_edges(_want)
+
         cases = [
             Case(name="existing cluster with secrets composes backend and CPC", req=req1, want=want1),
             Case(name="existing cluster with a non-GCP identity threads the identity type", req=req1b, want=want1b),
@@ -2791,7 +2890,9 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                 want=want13,
             ),
             Case(
-                name="cloud cluster not activated composes only the policy", req=req_unactivated, want=want_unactivated
+                name="cloud cluster not activated composes the policy, and the cluster waits on it",
+                req=req_unactivated,
+                want=want_unactivated,
             ),
             Case(name="observed cluster keeps composing through an activation blip", req=req_blip, want=want_blip),
             Case(name="Vultr cluster first pass composes VultrCluster XR only", req=req14, want=want14),
@@ -2808,6 +2909,11 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
             *guard_cases,
         ]
 
+        # Every case runs against a Crossplane that supports dependencies;
+        # the one that doesn't is its own test.
+        for case in cases:
+            case.req.meta.capabilities.append(fnv1.CAPABILITY_DEPENDENCIES)
+
         for case in cases:
             with self.subTest(case.name):
                 got = await self.runner.RunFunction(case.req, None)
@@ -2816,3 +2922,33 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                     json_format.MessageToDict(got),
                     "-want, +got",
                 )
+
+    async def test_compose_without_dependency_support(self) -> None:
+        """A Crossplane that ignores dependencies would apply managed
+        resources whose kinds aren't activated yet, and tear a cluster down
+        under a live serving stack, so the function fails the pipeline rather
+        than composing into it."""
+        req = fnv1.RunFunctionRequest(
+            observed=fnv1.State(
+                composite=fnv1.Resource(
+                    resource=resource.dict_to_struct(
+                        v1alpha1.InferenceCluster(
+                            metadata=metav1.ObjectMeta(name="test-cluster", namespace="modelplane-system"),
+                            spec=v1alpha1.Spec(
+                                cluster=v1alpha1.Cluster(
+                                    source="Existing",
+                                    existing=v1alpha1.Existing(
+                                        secretRef=v1alpha1.SecretRef(name="my-kubeconfig"),
+                                    ),
+                                ),
+                            ),
+                        ).model_dump(exclude_none=True, mode="json")
+                    )
+                ),
+            ),
+        )
+
+        got = await self.runner.RunFunction(req, None)
+
+        self.assertEqual([fnv1.SEVERITY_FATAL], [r.severity for r in got.results])
+        self.assertEqual({}, dict(got.desired.resources))
