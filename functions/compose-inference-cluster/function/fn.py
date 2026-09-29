@@ -33,7 +33,7 @@ The system pool is not exposed in the user-facing API.
 from typing import Final, Literal
 
 import grpc
-from crossplane.function import logging, request, resource, response
+from crossplane.function import logging, reference, request, resource, response
 from crossplane.function.proto.v1 import run_function_pb2 as fnv1
 from crossplane.function.proto.v1 import run_function_pb2_grpc as grpcv1
 from models.ai.modelplane.inferenceclass import v1alpha1 as iclv1alpha1
@@ -172,6 +172,33 @@ _ACTIVATE_VULTR = (
     "kubernetes.vke.vultr.m.upbound.io",
     "kubernetesnodepools.vke.vultr.m.upbound.io",
 )
+
+
+# The Modelplane-provisioned cluster XRs, which all publish status.secrets.
+_ClusterModel = (
+    type[gkev1alpha1.GKECluster]
+    | type[eksv1alpha1.EKSCluster]
+    | type[aksv1alpha1.AKSCluster]
+    | type[nebiusv1alpha1.NebiusCluster]
+    | type[vultrv1alpha1.VultrCluster]
+)
+_ClusterSecret = (
+    gkev1alpha1.Secret | eksv1alpha1.Secret | aksv1alpha1.Secret | nebiusv1alpha1.Secret | vultrv1alpha1.Secret
+)
+
+
+def _backend_secret(s: _ClusterSecret) -> ssv1alpha1.Secret:
+    """Copy one of a cluster XR's status.secrets onto the backend.
+
+    The namespace is copied only when the entry carries one, so entries in
+    the backend's own namespace stay namespace-free. Only Nebius sets one: its
+    credential is reused from the Secret the Nebius ClusterProviderConfig
+    references, outside modelplane-system.
+    """
+    secret = ssv1alpha1.Secret(type=s.type, name=s.name, key=s.key)
+    if namespace := getattr(s, "namespace", None):
+        secret.namespace = namespace
+    return secret
 
 
 def _name(meta: metav1.ObjectMeta | None) -> str:
@@ -405,25 +432,14 @@ class Composer:
         response.add_dependency(self.rsp, "gke-cluster", "activation")
 
         gke_ready = resource.get_condition(self.req.observed.resources.get("gke-cluster"), "Ready").status == "True"
-        kubeconfig_secret = self.observed_gke_secret(_SECRET_TYPE_KUBECONFIG)
-        sa_key = self.observed_gke_secret(_IDENTITY_TYPE_GCP)
         backend_exists = BACKEND_RESOURCE_KEY in self.req.observed.resources
 
-        if gke_ready and kubeconfig_secret:
-            self.compose_cluster_provider_config(
-                kubeconfig_secret.name,
-                kubeconfig_secret.key,
-                identity_ref=sa_key,
-                identity_type=_IDENTITY_TYPE_GCP,
-            )
-
-        backend_secrets = self.resolve_gke_backend_secrets(gke_ready=gke_ready, backend_exists=backend_exists)
-        if backend_secrets or backend_exists:
-            if backend_secrets:
-                self.compose_serving_stack(backend_secrets, CLUSTER_SOURCE_GKE)
-            # The backend outlives nothing; the cluster outlives it. This is
-            # the edge the usage-gke-by-backend Usage used to be.
-            response.add_dependency(self.rsp, BACKEND_RESOURCE_KEY, "gke-cluster")
+        self.compose_cluster_wiring(
+            "gke-cluster",
+            gkev1alpha1.GKECluster,
+            CLUSTER_SOURCE_GKE,
+            identity_type=_IDENTITY_TYPE_GCP,
+        )
 
         if gke_ready:
             self.rsp.desired.resources["gke-cluster"].ready = fnv1.READY_TRUE
@@ -459,19 +475,9 @@ class Composer:
         response.add_dependency(self.rsp, "eks-cluster", "activation")
 
         eks_ready = resource.get_condition(self.req.observed.resources.get("eks-cluster"), "Ready").status == "True"
-        kubeconfig = self.observed_eks_secret(_SECRET_TYPE_KUBECONFIG)
         backend_exists = BACKEND_RESOURCE_KEY in self.req.observed.resources
 
-        if eks_ready and kubeconfig:
-            self.compose_cluster_provider_config(kubeconfig.name, kubeconfig.key)
-
-        backend_secrets = self.resolve_eks_backend_secrets(eks_ready=eks_ready, backend_exists=backend_exists)
-        if backend_secrets or backend_exists:
-            if backend_secrets:
-                self.compose_serving_stack(backend_secrets, CLUSTER_SOURCE_EKS)
-            # The backend outlives nothing; the cluster outlives it. This is
-            # the edge the usage-eks-by-backend Usage used to be.
-            response.add_dependency(self.rsp, BACKEND_RESOURCE_KEY, "eks-cluster")
+        self.compose_cluster_wiring("eks-cluster", eksv1alpha1.EKSCluster, CLUSTER_SOURCE_EKS, identity_type=None)
 
         if eks_ready:
             self.rsp.desired.resources["eks-cluster"].ready = fnv1.READY_TRUE
@@ -505,19 +511,9 @@ class Composer:
         response.add_dependency(self.rsp, "aks-cluster", "activation")
 
         aks_ready = resource.get_condition(self.req.observed.resources.get("aks-cluster"), "Ready").status == "True"
-        kubeconfig = self.observed_aks_secret(_SECRET_TYPE_KUBECONFIG)
         backend_exists = BACKEND_RESOURCE_KEY in self.req.observed.resources
 
-        if aks_ready and kubeconfig:
-            self.compose_cluster_provider_config(kubeconfig.name, kubeconfig.key)
-
-        backend_secrets = self.resolve_aks_backend_secrets(aks_ready=aks_ready, backend_exists=backend_exists)
-        if backend_secrets or backend_exists:
-            if backend_secrets:
-                self.compose_serving_stack(backend_secrets, CLUSTER_SOURCE_AKS)
-            # The backend outlives nothing; the cluster outlives it. This is
-            # the edge the usage-aks-by-backend Usage used to be.
-            response.add_dependency(self.rsp, BACKEND_RESOURCE_KEY, "aks-cluster")
+        self.compose_cluster_wiring("aks-cluster", aksv1alpha1.AKSCluster, CLUSTER_SOURCE_AKS, identity_type=None)
 
         if aks_ready:
             self.rsp.desired.resources["aks-cluster"].ready = fnv1.READY_TRUE
@@ -555,25 +551,14 @@ class Composer:
         nebius_ready = (
             resource.get_condition(self.req.observed.resources.get("nebius-cluster"), "Ready").status == "True"
         )
-        kubeconfig = self.observed_nebius_secret(_SECRET_TYPE_KUBECONFIG)
-        credentials = self.observed_nebius_secret(_IDENTITY_TYPE_NEBIUS)
         backend_exists = BACKEND_RESOURCE_KEY in self.req.observed.resources
 
-        if nebius_ready and kubeconfig:
-            self.compose_cluster_provider_config(
-                kubeconfig.name,
-                kubeconfig.key,
-                identity_ref=credentials,
-                identity_type=_IDENTITY_TYPE_NEBIUS,
-            )
-
-        backend_secrets = self.resolve_nebius_backend_secrets(nebius_ready=nebius_ready, backend_exists=backend_exists)
-        if backend_secrets or backend_exists:
-            if backend_secrets:
-                self.compose_serving_stack(backend_secrets, CLUSTER_SOURCE_NEBIUS)
-            # The backend outlives nothing; the cluster outlives it. This is
-            # the edge the usage-nebius-by-backend Usage used to be.
-            response.add_dependency(self.rsp, BACKEND_RESOURCE_KEY, "nebius-cluster")
+        self.compose_cluster_wiring(
+            "nebius-cluster",
+            nebiusv1alpha1.NebiusCluster,
+            CLUSTER_SOURCE_NEBIUS,
+            identity_type=_IDENTITY_TYPE_NEBIUS,
+        )
 
         if nebius_ready:
             self.rsp.desired.resources["nebius-cluster"].ready = fnv1.READY_TRUE
@@ -607,19 +592,11 @@ class Composer:
         response.add_dependency(self.rsp, "vultr-cluster", "activation")
 
         vultr_ready = resource.get_condition(self.req.observed.resources.get("vultr-cluster"), "Ready").status == "True"
-        kubeconfig = self.observed_vultr_secret(_SECRET_TYPE_KUBECONFIG)
         backend_exists = BACKEND_RESOURCE_KEY in self.req.observed.resources
 
-        if vultr_ready and kubeconfig:
-            self.compose_cluster_provider_config(kubeconfig.name, kubeconfig.key)
-
-        backend_secrets = self.resolve_vultr_backend_secrets(vultr_ready=vultr_ready, backend_exists=backend_exists)
-        if backend_secrets or backend_exists:
-            if backend_secrets:
-                self.compose_serving_stack(backend_secrets, CLUSTER_SOURCE_VULTR)
-            # The backend outlives nothing; the cluster outlives it. This is
-            # the edge the usage-vultr-by-backend Usage used to be.
-            response.add_dependency(self.rsp, BACKEND_RESOURCE_KEY, "vultr-cluster")
+        self.compose_cluster_wiring(
+            "vultr-cluster", vultrv1alpha1.VultrCluster, CLUSTER_SOURCE_VULTR, identity_type=None
+        )
 
         if vultr_ready:
             self.rsp.desired.resources["vultr-cluster"].ready = fnv1.READY_TRUE
@@ -715,6 +692,50 @@ class Composer:
 
             if existing.identitySecretRef:
                 response.add_required_resource_dependency(self.rsp, key, _REQUIRED_IDENTITY)
+
+    def compose_cluster_wiring(
+        self,
+        cluster_key: str,
+        cluster_model: _ClusterModel,
+        cloud: Cloud,
+        *,
+        identity_type: str | None,
+    ) -> None:
+        """Compose what reaches into a Modelplane-provisioned cluster.
+
+        The cluster XR publishes the Secrets that reach it in status.secrets:
+        a kubeconfig, and for GKE and Nebius a cloud identity layered on top.
+        The ProviderConfig ModelReplicas use and the backend ServingStack are
+        both built from them, so each refers to the cluster's status rather
+        than reading it by hand. That makes each depend on the cluster: it's
+        created once the cluster is ready, and the cluster isn't deleted until
+        it's gone - the edge the usage-<cloud>-by-backend Usage used to be.
+
+        A Secret the cluster hasn't published yet leaves what needs it out,
+        and ordering holds it back. One that goes missing later leaves what
+        already exists as it is, rather than deleting it.
+        """
+        cluster = reference.named(cluster_key, cluster_model)
+
+        with reference.composing(self.req, self.rsp, _CLUSTER_PC_RESOURCE_KEY) as c:
+            secrets = c.ref(cluster.status.secrets) or []  # ty: ignore[unresolved-attribute]  # a reference records the path; it never reads None
+            kubeconfig = next((s for s in secrets if s.type == _SECRET_TYPE_KUBECONFIG), None)
+            if kubeconfig:
+                identity = next((s for s in secrets if s.type == identity_type), None) if identity_type else None
+                # Only GKE and Nebius publish an identity.
+                if not isinstance(identity, gkev1alpha1.Secret | nebiusv1alpha1.Secret):
+                    identity = None
+                self.compose_cluster_provider_config(
+                    kubeconfig.name,
+                    kubeconfig.key,
+                    identity_ref=identity,
+                    identity_type=identity_type,
+                )
+
+        with reference.composing(self.req, self.rsp, BACKEND_RESOURCE_KEY) as c:
+            secrets = c.ref(cluster.status.secrets)  # ty: ignore[unresolved-attribute]  # a reference records the path; it never reads None
+            if secrets:
+                self.compose_serving_stack([_backend_secret(s) for s in secrets], cloud)
 
     def compose_serving_stack(
         self,
@@ -1125,63 +1146,6 @@ class Composer:
             ),
         )
 
-    def resolve_nebius_backend_secrets(
-        self, *, nebius_ready: bool, backend_exists: bool
-    ) -> list[ssv1alpha1.Secret] | None:
-        """Resolve secrets for the backend from NebiusCluster status. Falls
-        back to the observed backend's spec.secrets if NebiusCluster secrets
-        aren't available but the backend already exists. Entries keep their
-        namespace when set - the Nebius credential is reused from the Secret
-        the Nebius ClusterProviderConfig references, outside
-        modelplane-system."""
-        nebius_secrets = self.observed_nebius_secrets()
-
-        if nebius_ready and nebius_secrets:
-            secrets = []
-            for s in nebius_secrets:
-                secret = ssv1alpha1.Secret(
-                    type=s.type, name=s.name, key=s.key
-                )  # values come from the XRD secret-type enums
-                # Only set namespace when the entry carries one, so entries in
-                # the backend's own namespace stay namespace-free.
-                if s.namespace:
-                    secret.namespace = s.namespace
-                secrets.append(secret)
-            return secrets
-
-        if backend_exists:
-            observed = self.req.observed.resources.get(BACKEND_RESOURCE_KEY)
-            if observed:
-                d = resource.struct_to_dict(observed.resource)
-                observed_secrets = d.get("spec", {}).get("secrets", [])
-                if observed_secrets:
-                    secrets = []
-                    for s in observed_secrets:
-                        secret = ssv1alpha1.Secret(type=s["type"], name=s["name"], key=s["key"])
-                        if s.get("namespace"):
-                            secret.namespace = s["namespace"]
-                        secrets.append(secret)
-                    return secrets
-
-        return None
-
-    def observed_nebius_secrets(self) -> list[nebiusv1alpha1.Secret] | None:
-        """Read the NebiusCluster's status.secrets from observed state."""
-        nebius_observed = self.req.observed.resources.get("nebius-cluster")
-        if not nebius_observed:
-            return None
-        observed_nebius = nebiusv1alpha1.NebiusCluster.model_validate(resource.struct_to_dict(nebius_observed.resource))
-        if not observed_nebius.status:
-            return None
-        return observed_nebius.status.secrets
-
-    def observed_nebius_secret(self, secret_type: str) -> nebiusv1alpha1.Secret | None:
-        """Read a specific secret from the observed NebiusCluster status."""
-        nebius_secrets = self.observed_nebius_secrets()
-        if not nebius_secrets:
-            return None
-        return next((s for s in nebius_secrets if s.type == secret_type), None)
-
     def compose_vultr_cluster(self, vultr: v1alpha1.Vultr) -> None:
         """Compose a VultrCluster XR.
 
@@ -1248,135 +1212,6 @@ class Composer:
             ),
         )
 
-    def resolve_vultr_backend_secrets(
-        self, *, vultr_ready: bool, backend_exists: bool
-    ) -> list[ssv1alpha1.Secret] | None:
-        """Resolve secrets for the backend from VultrCluster status. Falls
-        back to the observed backend's spec.secrets if VultrCluster secrets
-        aren't available but the backend already exists."""
-        vultr_secrets = self.observed_vultr_secrets()
-
-        if vultr_ready and vultr_secrets:
-            return [ssv1alpha1.Secret(type=s.type, name=s.name, key=s.key) for s in vultr_secrets]
-
-        if backend_exists:
-            observed = self.req.observed.resources.get(BACKEND_RESOURCE_KEY)
-            if observed:
-                d = resource.struct_to_dict(observed.resource)
-                observed_secrets = d.get("spec", {}).get("secrets", [])
-                if observed_secrets:
-                    return [ssv1alpha1.Secret(type=s["type"], name=s["name"], key=s["key"]) for s in observed_secrets]
-
-        return None
-
-    def observed_vultr_secrets(self) -> list[vultrv1alpha1.Secret] | None:
-        """Read the VultrCluster's status.secrets from observed state."""
-        vultr_observed = self.req.observed.resources.get("vultr-cluster")
-        if not vultr_observed:
-            return None
-        observed_vultr = vultrv1alpha1.VultrCluster.model_validate(resource.struct_to_dict(vultr_observed.resource))
-        if not observed_vultr.status:
-            return None
-        return observed_vultr.status.secrets
-
-    def observed_vultr_secret(self, secret_type: str) -> vultrv1alpha1.Secret | None:
-        """Read a specific secret from the observed VultrCluster status."""
-        vultr_secrets = self.observed_vultr_secrets()
-        if not vultr_secrets:
-            return None
-        return next((s for s in vultr_secrets if s.type == secret_type), None)
-
-    def resolve_eks_backend_secrets(self, *, eks_ready: bool, backend_exists: bool) -> list[ssv1alpha1.Secret] | None:
-        """Resolve secrets for the backend from EKSCluster status. Falls
-        back to the observed backend's spec.secrets if EKSCluster secrets
-        aren't available but the backend already exists."""
-        eks_secrets = self.observed_eks_secrets()
-
-        if eks_ready and eks_secrets:
-            return [ssv1alpha1.Secret(type=s.type, name=s.name, key=s.key) for s in eks_secrets]
-
-        if backend_exists:
-            observed = self.req.observed.resources.get(BACKEND_RESOURCE_KEY)
-            if observed:
-                d = resource.struct_to_dict(observed.resource)
-                observed_secrets = d.get("spec", {}).get("secrets", [])
-                if observed_secrets:
-                    return [ssv1alpha1.Secret(type=s["type"], name=s["name"], key=s["key"]) for s in observed_secrets]
-
-        return None
-
-    def observed_eks_secrets(self) -> list[eksv1alpha1.Secret] | None:
-        """Read the EKSCluster's status.secrets from observed state."""
-        eks_observed = self.req.observed.resources.get("eks-cluster")
-        if not eks_observed:
-            return None
-        observed_eks = eksv1alpha1.EKSCluster.model_validate(resource.struct_to_dict(eks_observed.resource))
-        if not observed_eks.status:
-            return None
-        return observed_eks.status.secrets
-
-    def observed_eks_secret(self, secret_type: str) -> eksv1alpha1.Secret | None:
-        """Read a specific secret from the observed EKSCluster status."""
-        eks_secrets = self.observed_eks_secrets()
-        if not eks_secrets:
-            return None
-        return next((s for s in eks_secrets if s.type == secret_type), None)
-
-    def resolve_aks_backend_secrets(self, *, aks_ready: bool, backend_exists: bool) -> list[ssv1alpha1.Secret] | None:
-        """Resolve secrets for the backend from AKSCluster status. Falls
-        back to the observed backend's spec.secrets if AKSCluster secrets
-        aren't available but the backend already exists."""
-        aks_secrets = self.observed_aks_secrets()
-
-        if aks_ready and aks_secrets:
-            return [ssv1alpha1.Secret(type=s.type, name=s.name, key=s.key) for s in aks_secrets]
-
-        if backend_exists:
-            observed = self.req.observed.resources.get(BACKEND_RESOURCE_KEY)
-            if observed:
-                d = resource.struct_to_dict(observed.resource)
-                observed_secrets = d.get("spec", {}).get("secrets", [])
-                if observed_secrets:
-                    return [ssv1alpha1.Secret(type=s["type"], name=s["name"], key=s["key"]) for s in observed_secrets]
-
-        return None
-
-    def observed_aks_secrets(self) -> list[aksv1alpha1.Secret] | None:
-        """Read the AKSCluster's status.secrets from observed state."""
-        aks_observed = self.req.observed.resources.get("aks-cluster")
-        if not aks_observed:
-            return None
-        observed_aks = aksv1alpha1.AKSCluster.model_validate(resource.struct_to_dict(aks_observed.resource))
-        if not observed_aks.status:
-            return None
-        return observed_aks.status.secrets
-
-    def observed_aks_secret(self, secret_type: str) -> aksv1alpha1.Secret | None:
-        """Read a specific secret from the observed AKSCluster status."""
-        aks_secrets = self.observed_aks_secrets()
-        if not aks_secrets:
-            return None
-        return next((s for s in aks_secrets if s.type == secret_type), None)
-
-    def resolve_gke_backend_secrets(self, *, gke_ready: bool, backend_exists: bool) -> list[ssv1alpha1.Secret] | None:
-        """Resolve secrets for the backend from GKECluster status. Falls
-        back to the observed backend's spec.secrets if GKECluster secrets aren't
-        available but the backend already exists."""
-        gke_secrets = self.observed_gke_secrets()
-
-        if gke_ready and gke_secrets:
-            return [ssv1alpha1.Secret(type=s.type, name=s.name, key=s.key) for s in gke_secrets]
-
-        if backend_exists:
-            observed = self.req.observed.resources.get(BACKEND_RESOURCE_KEY)
-            if observed:
-                d = resource.struct_to_dict(observed.resource)
-                observed_secrets = d.get("spec", {}).get("secrets", [])
-                if observed_secrets:
-                    return [ssv1alpha1.Secret(type=s["type"], name=s["name"], key=s["key"]) for s in observed_secrets]
-
-        return None
-
     def gpu_pools(self) -> list[dict[str, object]]:
         """Derive status.gpuPools from each node pool's class.
 
@@ -1404,23 +1239,6 @@ class Composer:
                 }
             )
         return gpu_pools
-
-    def observed_gke_secrets(self) -> list[gkev1alpha1.Secret] | None:
-        """Read the GKECluster's status.secrets from observed state."""
-        gke_observed = self.req.observed.resources.get("gke-cluster")
-        if not gke_observed:
-            return None
-        observed_gke = gkev1alpha1.GKECluster.model_validate(resource.struct_to_dict(gke_observed.resource))
-        if not observed_gke.status:
-            return None
-        return observed_gke.status.secrets
-
-    def observed_gke_secret(self, secret_type: str) -> gkev1alpha1.Secret | None:
-        """Read a specific secret from the observed GKECluster status."""
-        gke_secrets = self.observed_gke_secrets()
-        if not gke_secrets:
-            return None
-        return next((s for s in gke_secrets if s.type == secret_type), None)
 
     def observed_gateway_address(self) -> str | None:
         """Read the backend's gateway address from observed state.

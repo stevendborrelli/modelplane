@@ -114,8 +114,10 @@ def _wants_cloud_edges(want: fnv1.RunFunctionResponse) -> None:
     """Add the edges a cloud path declares, and drop the Usage they replaced.
 
     The cluster XR waits on the activation policy that makes its managed
-    resource kinds known, and the serving stack waits on the cluster - which
-    is what the usage-<cloud>-by-backend Usage used to say about teardown.
+    resource kinds known. The ClusterProviderConfig and the serving stack are
+    both built from the cluster's status.secrets, so each depends on the
+    cluster - the serving stack's edge is what the usage-<cloud>-by-backend
+    Usage used to say about teardown.
 
     Derived from the want itself rather than passed in: the resources it
     expects are what determine which edges the function emits.
@@ -131,6 +133,11 @@ def _wants_cloud_edges(want: fnv1.RunFunctionResponse) -> None:
         return
 
     want.dependencies.items.append(fnv1.Dependency(resource=f"{cloud}-cluster", composed_resource="activation"))
+
+    if "cluster-provider-config-kubernetes" in want.desired.resources:
+        want.dependencies.items.append(
+            fnv1.Dependency(resource="cluster-provider-config-kubernetes", composed_resource=f"{cloud}-cluster")
+        )
 
     if "serving-stack" in want.desired.resources:
         want.dependencies.items.append(fnv1.Dependency(resource="serving-stack", composed_resource=f"{cloud}-cluster"))
@@ -1189,9 +1196,10 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
 
         # --- Case 5: EKS cluster not yet ready (no kubeconfig observed) but a
         # ClusterProviderConfig already exists from a prior reconcile. The CPC
-        # is built only from the kubeconfig, so without one it's simply omitted
-        # from desired state this reconcile (and recreated once the kubeconfig
-        # is observed again) - it is never emitted with an empty secretRef.
+        # is built from the kubeconfig, and without one it keeps the spec it
+        # has, with a warning saying why - rather than being left out of
+        # desired state, which would delete a ProviderConfig ModelReplicas
+        # use. It is never emitted with an empty secretRef.
         observed_cpc = {
             "apiVersion": "kubernetes.m.crossplane.io/v1alpha1",
             "kind": "ClusterProviderConfig",
@@ -1213,9 +1221,19 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
             fnv1.Resource(resource=resource.dict_to_struct(observed_cpc)),
         )
 
-        # Desired state is identical to case 4: no ClusterProviderConfig.
+        # Case 4's desired state, plus the existing CPC kept as it is.
         want5 = fnv1.RunFunctionResponse()
         want5.CopyFrom(want4)
+        want5.desired.resources["cluster-provider-config-kubernetes"].CopyFrom(
+            fnv1.Resource(resource=resource.dict_to_struct(observed_cpc)),
+        )
+        want5.results.append(
+            fnv1.Result(
+                severity=fnv1.SEVERITY_WARNING,
+                message="cluster-provider-config-kubernetes: kept its current spec, "
+                "because eks-cluster.status.secrets isn't available",
+            )
+        )
 
         # --- Case 6: GKE cluster ready - composes CPC, backend, usage, and the
         # VPC-pinned modelplane-rwx Filestore StorageClass on the workload
@@ -2857,6 +2875,34 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
         ):
             _wants_cloud_edges(_want)
 
+        # --- Case 6b: the GKE cluster stops publishing its Secrets after the
+        # backend exists. The backend is built from them, and without them it
+        # keeps the spec it has, with a warning saying why - rather than being
+        # left out of desired state, which would delete the serving stack.
+        req6b = fnv1.RunFunctionRequest()
+        req6b.CopyFrom(req6)
+        gke6b = resource.struct_to_dict(req6b.observed.resources["gke-cluster"].resource)
+        gke6b["status"].pop("secrets", None)
+        req6b.observed.resources["gke-cluster"].resource.CopyFrom(resource.dict_to_struct(gke6b))
+        req6b.observed.resources["serving-stack"].resource.CopyFrom(want6.desired.resources["serving-stack"].resource)
+        want6b = fnv1.RunFunctionResponse()
+        want6b.CopyFrom(want6)
+        # No CPC existed yet and there's no kubeconfig to build one from, so
+        # there's none to compose or keep, and nothing for it to depend on.
+        del want6b.desired.resources["cluster-provider-config-kubernetes"]
+        kept = [d for d in want6b.dependencies.items if d.resource != "cluster-provider-config-kubernetes"]
+        del want6b.dependencies.items[:]
+        want6b.dependencies.items.extend(kept)
+        # The backend already exists, so there's no "composing backend"
+        # result, only the warning saying why its spec was kept.
+        del want6b.results[:]
+        want6b.results.append(
+            fnv1.Result(
+                severity=fnv1.SEVERITY_WARNING,
+                message="serving-stack: kept its current spec, because gke-cluster.status.secrets isn't available",
+            )
+        )
+
         cases = [
             Case(name="existing cluster with secrets composes backend and CPC", req=req1, want=want1),
             Case(name="existing cluster with a non-GCP identity threads the identity type", req=req1b, want=want1b),
@@ -2864,8 +2910,9 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
             Case(name="GKE credentials pass through to GKECluster spec", req=req_creds, want=want_creds),
             Case(name="existing cluster second pass with backend ready", req=req3, want=want3),
             Case(name="EKS cluster first pass composes EKSCluster XR only", req=req4, want=want4),
-            Case(name="EKS cluster not ready re-emits existing CPC unchanged", req=req5, want=want5),
+            Case(name="EKS cluster not ready keeps the existing CPC", req=req5, want=want5),
             Case(name="GKE cluster ready composes CPC, backend, usage, and RWX StorageClass", req=req6, want=want6),
+            Case(name="GKE cluster losing its secrets keeps the existing backend", req=req6b, want=want6b),
             Case(name="EKS cluster ready composes ServingStack and Usage", req=req7, want=want7),
             Case(
                 name="EKS node pool with a Capacity Block sets capacityBlock on the EKSCluster pool",
