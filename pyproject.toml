@@ -19,7 +19,7 @@ members = ["functions/*", "schemas/python"]
 # against 0.14.0, which has no response.add_dependency. For the matching
 # Crossplane, see CROSSPLANE_IMAGE in e2e/README.md.
 [tool.uv.sources]
-crossplane-function-sdk-python = { git = "https://github.com/stevendborrelli/function-sdk-python", rev = "dfa3d571ac875981dd8a93c93a1de4b3bf29568e" }
+crossplane-function-sdk-python = { git = "https://github.com/stevendborrelli/function-sdk-python", rev = "e0f7ac74a45e35a6809830bba0ffca28eaf8a248" }
 
 [dependency-groups]
 dev = [
