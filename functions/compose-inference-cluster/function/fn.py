@@ -33,7 +33,7 @@ The system pool is not exposed in the user-facing API.
 from typing import Final, Literal
 
 import grpc
-from crossplane.function import logging, reference, request, resource, response
+from crossplane.function import dependency, logging, request, resource, response
 from crossplane.function.proto.v1 import run_function_pb2 as fnv1
 from crossplane.function.proto.v1 import run_function_pb2_grpc as grpcv1
 from models.ai.modelplane.inferenceclass import v1alpha1 as iclv1alpha1
@@ -715,9 +715,9 @@ class Composer:
         and ordering holds it back. One that goes missing later leaves what
         already exists as it is, rather than deleting it.
         """
-        cluster = reference.named(cluster_key, cluster_model)
+        cluster = dependency.named(cluster_key, cluster_model)
 
-        with reference.composing(self.req, self.rsp, _CLUSTER_PC_RESOURCE_KEY) as c:
+        with dependency.composing(self.req, self.rsp, _CLUSTER_PC_RESOURCE_KEY) as c:
             secrets = c.ref(cluster.status.secrets) or []  # ty: ignore[unresolved-attribute]  # a reference records the path; it never reads None
             kubeconfig = next((s for s in secrets if s.type == _SECRET_TYPE_KUBECONFIG), None)
             if kubeconfig:
@@ -732,7 +732,7 @@ class Composer:
                     identity_type=identity_type,
                 )
 
-        with reference.composing(self.req, self.rsp, BACKEND_RESOURCE_KEY) as c:
+        with dependency.composing(self.req, self.rsp, BACKEND_RESOURCE_KEY) as c:
             secrets = c.ref(cluster.status.secrets)  # ty: ignore[unresolved-attribute]  # a reference records the path; it never reads None
             if secrets:
                 self.compose_serving_stack([_backend_secret(s) for s in secrets], cloud)

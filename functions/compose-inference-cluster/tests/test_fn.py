@@ -132,6 +132,16 @@ def _wants_cloud_edges(want: fnv1.RunFunctionResponse) -> None:
     if cloud is None:
         return
 
+    # The cluster's ProviderConfig and backend are composed in
+    # dependency.composing scopes, which report whether either was kept at
+    # its current spec for want of a value. A case that expects one kept sets
+    # the condition itself.
+    if not any(c.type == "DependencyValuesAvailable" for c in want.conditions):
+        want.conditions.insert(
+            0,
+            fnv1.Condition(type="DependencyValuesAvailable", status=fnv1.STATUS_CONDITION_TRUE, reason="Available"),
+        )
+
     want.dependencies.items.append(fnv1.Dependency(resource=f"{cloud}-cluster", composed_resource="activation"))
 
     if "cluster-provider-config-kubernetes" in want.desired.resources:
@@ -141,6 +151,17 @@ def _wants_cloud_edges(want: fnv1.RunFunctionResponse) -> None:
 
     if "serving-stack" in want.desired.resources:
         want.dependencies.items.append(fnv1.Dependency(resource="serving-stack", composed_resource=f"{cloud}-cluster"))
+
+
+def _kept_condition(key: str, cluster: str) -> fnv1.Condition:
+    """The condition saying key was kept at its current spec because the
+    cluster isn't publishing the Secrets it's built from."""
+    return fnv1.Condition(
+        type="DependencyValuesAvailable",
+        status=fnv1.STATUS_CONDITION_FALSE,
+        reason="KeptCurrentSpec",
+        message=f"{key} kept its current spec: {cluster}.status.secrets isn't available",
+    )
 
 
 def _secret_selector(name: str) -> fnv1.ResourceSelector:
@@ -1227,13 +1248,7 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
         want5.desired.resources["cluster-provider-config-kubernetes"].CopyFrom(
             fnv1.Resource(resource=resource.dict_to_struct(observed_cpc)),
         )
-        want5.results.append(
-            fnv1.Result(
-                severity=fnv1.SEVERITY_WARNING,
-                message="cluster-provider-config-kubernetes: kept its current spec, "
-                "because eks-cluster.status.secrets isn't available",
-            )
-        )
+        want5.conditions.insert(0, _kept_condition("cluster-provider-config-kubernetes", "eks-cluster"))
 
         # --- Case 6: GKE cluster ready - composes CPC, backend, usage, and the
         # VPC-pinned modelplane-rwx Filestore StorageClass on the workload
@@ -2894,14 +2909,9 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
         del want6b.dependencies.items[:]
         want6b.dependencies.items.extend(kept)
         # The backend already exists, so there's no "composing backend"
-        # result, only the warning saying why its spec was kept.
+        # result, and the condition says why its spec was kept.
         del want6b.results[:]
-        want6b.results.append(
-            fnv1.Result(
-                severity=fnv1.SEVERITY_WARNING,
-                message="serving-stack: kept its current spec, because gke-cluster.status.secrets isn't available",
-            )
-        )
+        want6b.conditions[0].CopyFrom(_kept_condition("serving-stack", "gke-cluster"))
 
         cases = [
             Case(name="existing cluster with secrets composes backend and CPC", req=req1, want=want1),
