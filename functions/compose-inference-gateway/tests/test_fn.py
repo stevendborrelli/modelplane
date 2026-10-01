@@ -368,6 +368,23 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                 got = await self.runner.RunFunction(case.req, None)
                 self.assertEqual(_dict(case.want), _dict(got), "-want, +got")
 
+    async def test_compose_metallb_dependencies(self) -> None:
+        """MetalLB's release, pool and advertisement all live in its namespace,
+        so they depend on it: teardown removes them before the namespace that
+        holds them and Helm's record of the release."""
+        req = _request()
+        xr = resource.struct_to_dict(req.observed.composite.resource)
+        xr["spec"]["traefik"].update({"loadBalancer": "MetalLB", "metallb": {"addressPool": "172.19.255.200/32"}})
+        req.observed.composite.resource.CopyFrom(resource.dict_to_struct(xr))
+
+        got = await self.runner.RunFunction(req, None)
+
+        edges = {(d.resource, d.composed_resource) for d in got.dependencies.items}
+        for key in ("metallb", "metallb-pool", "metallb-l2"):
+            self.assertIn((key, "namespace-metallb"), edges)
+        for key in ("metallb-pool", "metallb-l2"):
+            self.assertIn((key, "metallb"), edges)
+
     async def test_compose_without_dependency_support(self) -> None:
         """A Crossplane that ignores dependencies would install Traefik before
         the Gateway API CRDs exist, and uninstall it before the GatewayClass

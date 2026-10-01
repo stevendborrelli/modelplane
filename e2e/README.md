@@ -152,6 +152,22 @@ failure. It's the exact command the `E2E` CI workflow runs, so a green `--verify
 locally and a green CI run mean the same thing; use the manual curls above to
 poke the endpoints interactively.
 
+### Checking teardown
+
+`e2e/teardown-check.py` deletes what `--verify` left up the way a user would,
+with a plain `kubectl delete` and so background propagation: the
+`ModelService` and `ModelDeployment`, then the `InferenceGateway`, then the
+`InferenceCluster`. It watches every object each one composed, nested XRs
+included, and fails if an XR disappears before what it composed, if a resource
+starts deleting while something that depends on it still exists, or if
+anything is left behind. That's issue #477: an XR that goes too early releases
+whatever was waiting on it while its Helm releases and Objects are still
+finalizing.
+
+```bash
+nix run .#e2e -- --verify && ./e2e/teardown-check.py
+```
+
 ## How it's structured
 
 `nix run .#e2e` materialises the Nix-built function images and hands off to

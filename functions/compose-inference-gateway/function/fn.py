@@ -456,6 +456,12 @@ class Composer:
             for key in ("metallb-pool", "metallb-l2"):
                 response.add_dependency(self.rsp, key, "metallb")
 
+            # The release, its pool and its advertisement all live in
+            # metallb-system, and Helm keeps the release's record there too.
+            # Deleting the namespace alongside them races the uninstall.
+            for key in ("metallb", "metallb-pool", "metallb-l2"):
+                response.add_dependency(self.rsp, key, "namespace-metallb")
+
         for doc in _GATEWAY_API_CRDS:
             response.add_dependency(self.rsp, "traefik", _crd_key(doc))
 
