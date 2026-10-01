@@ -44,16 +44,15 @@ import subprocess
 import sys
 import time
 
+# Each step deletes every object of these kinds, wherever they are. Kinds
+# rather than names, so the check doesn't depend on what an e2e calls things.
 STEPS = [
     (
-        "model service and deployment",
-        [
-            ("ModelService", "modelplane.ai/v1alpha1", "ml-team", "mock"),
-            ("ModelDeployment", "modelplane.ai/v1alpha1", "ml-team", "mock-demo"),
-        ],
+        "model services and deployments",
+        [("ModelService", "modelplane.ai/v1alpha1"), ("ModelDeployment", "modelplane.ai/v1alpha1")],
     ),
-    ("inference gateway", [("InferenceGateway", "modelplane.ai/v1alpha1", "", "default")]),
-    ("inference cluster", [("InferenceCluster", "modelplane.ai/v1alpha1", "", "local")]),
+    ("inference gateways", [("InferenceGateway", "modelplane.ai/v1alpha1")]),
+    ("inference clusters", [("InferenceCluster", "modelplane.ai/v1alpha1")]),
 ]
 
 
@@ -142,16 +141,41 @@ class Watcher:
             for o, body in zip(live, pool.map(self.get, live), strict=True):
                 self.observe(o, body, now)
 
-    def step(self, roots: list[tuple[str, str, str, str]], timeout: float, interval: float) -> list[Obj]:
-        tree = [self.add(Obj(*r)) for r in roots]
-        self.poll()  # Discover the trees before deleting anything.
+    def instances(self, kind: str, api_version: str) -> list[Obj]:
+        """Every object of a kind, in every namespace."""
+        r = self.kubectl("get", resource_arg(kind, api_version), "-A", "-o", "json")
+        if r.returncode != 0:
+            msg = f"kubectl get {kind}: {r.stderr.strip()}"
+            raise RuntimeError(msg)
+        items = json.loads(r.stdout).get("items", [])
+        return [Obj(kind, api_version, i["metadata"].get("namespace", ""), i["metadata"]["name"]) for i in items]
 
+    def step(self, kinds: list[tuple[str, str]], timeout: float, interval: float) -> tuple[list[Obj], int]:
+        tree = [self.add(o) for kind, api_version in kinds for o in self.instances(kind, api_version)]
+        if not tree:
+            print("  nothing to delete")
+            return [], 0
+
+        # Discover the whole tree before deleting anything. Each poll reads
+        # one more level of nested XRs' references, and an XR that goes at
+        # once - which is what this checks for - would take the rest of its
+        # tree out of sight with it.
+        known = -1
+        while known != len(self.subtree(tree)):
+            known = len(self.subtree(tree))
+            self.poll()
+
+        refused = 0
         for o in tree:
             args = ["delete", resource_arg(o.kind, o.api_version), o.name, "--wait=false"]
             if o.namespace:
                 args += ["-n", o.namespace]
             r = self.kubectl(*args)
-            print(f"  deleted {o}: {(r.stdout or r.stderr).strip()}")
+            if r.returncode != 0:
+                refused += 1
+                print(f"  !! the API server refused to delete {o}: {r.stderr.strip()}")
+                continue
+            print(f"  deleted {o}")
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -160,7 +184,7 @@ class Watcher:
                 break
             time.sleep(interval)
 
-        return self.subtree(tree)
+        return self.subtree(tree), refused
 
     def subtree(self, roots: list[Obj]) -> list[Obj]:
         out, frontier = [], list(roots)
@@ -231,8 +255,8 @@ def main() -> int:
     problems = 0
     for label, roots in STEPS:
         print(f"\n==> deleting the {label}")
-        objs = w.step(roots, args.timeout, args.interval)
-        problems += report(objs, args.interval)
+        objs, refused = w.step(roots, args.timeout, args.interval)
+        problems += refused + report(objs, args.interval)
 
     print(f"\n{'OK' if problems == 0 else f'{problems} problem(s)'}")
     return 1 if problems else 0
