@@ -300,7 +300,7 @@
   # same virtualenvs nix flake check uses. With no function named it runs every
   # function's tests, each in a pytest session of its own because every
   # function's package is named `function`. Arguments after the function name
-  # go to pytest, e.g. nix run .#test -- compose-usages -k namespace.
+  # go to pytest, e.g. nix run .#test -- compose-inference-class -k DRA.
   test =
     {
       pythonSet,

@@ -25,7 +25,6 @@ members = [
     "compose-nebius-cluster",
     "compose-serving-stack",
     "compose-telemetry-destination",
-    "compose-usages",
     "compose-vultr-cluster",
     "crossplane-models",
     "modelplane",
@@ -585,25 +584,6 @@ requires-dist = [
 name = "compose-telemetry-destination"
 version = "0.0.0"
 source = { editable = "functions/compose-telemetry-destination" }
-dependencies = [
-    { name = "click" },
-    { name = "crossplane-function-sdk-python" },
-    { name = "crossplane-models" },
-    { name = "grpcio" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "click", specifier = ">=8.1.0" },
-    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=20115c77d5da71f482d99d0f9ebe1115b14780d3" },
-    { name = "crossplane-models", editable = "schemas/python" },
-    { name = "grpcio", specifier = ">=1.73.1" },
-]
-
-[[package]]
-name = "compose-usages"
-version = "0.0.0"
-source = { editable = "functions/compose-usages" }
 dependencies = [
     { name = "click" },
     { name = "crossplane-function-sdk-python" },

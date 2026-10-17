@@ -11,6 +11,3 @@ spec:
   - functionRef:
       name: modelplane-modelplanecompose-serving-stack
     step: compose-serving-stack
-  - functionRef:
-      name: modelplane-modelplanecompose-usages
-    step: compose-usages

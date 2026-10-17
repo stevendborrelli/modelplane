@@ -68,7 +68,6 @@
         "compose-model-replica"
         "compose-model-route"
         "compose-model-service"
-        "compose-usages"
       ];
 
       supportedSystems = [

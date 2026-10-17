@@ -377,7 +377,7 @@ outside the sandbox. Name a function to run only its tests, and pass pytest
 arguments after it:
 
 ```bash
-nix run .#test -- compose-usages -k namespace
+nix run .#test -- compose-inference-class -k DRA
 ```
 
 Each function runs in a pytest session of its own, because every function names
