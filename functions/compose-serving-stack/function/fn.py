@@ -445,8 +445,9 @@ class Composer:
         per (dependency doc, dependent doc) pair: the kai-scheduler
         release outlives the Queue CRs whose CRD it owns, cert-manager
         outlives the Envoy Gateway release whose webhooks need it. And
-        the gateway pair, which isn't stack data, is sequenced by hand
-        against the controller that owns its finalizers.
+        what isn't stack data - the gateway pair, its PKI and its client
+        policy - is sequenced by hand against the controllers and CRDs it
+        needs.
 
         composed is every key this function rendered onto the remote
         cluster.
@@ -471,6 +472,33 @@ class Composer:
         if "gateway" in self.rsp.desired.resources:
             response.add_dependency(self.rsp, "gateway", "gateway-class")
         response.add_dependency(self.rsp, "gateway-class", "envoy-gateway")
+
+        # The gateway's PKI and client policy are hand-rendered too, and each
+        # needs something the stack installs or the object before it in the
+        # chain: a CRD, a controller to act on it, or a secret to read. Say
+        # so, and each waits for what it needs instead of retrying against an
+        # API that isn't there yet - and at teardown goes before the
+        # controller that has to finalize it, rather than racing its
+        # uninstall. An edge is declared only while both ends are composed:
+        # the Gateway and the client policy aren't always.
+        for key, dependency_key in (
+            # The EnvoyProxy CRD, like the GatewayClass's, comes with the
+            # release. Declared here rather than as a depends_on in the stack
+            # data, which would make envoy-gateway a chart that has to wait
+            # for health, when all this needs is the CRD.
+            ("gateway-proxy", "envoy-gateway"),
+            ("gateway-ca-certificate", "gateway-selfsigned-issuer"),
+            ("gateway-ca-issuer", "gateway-ca-certificate"),
+            ("gateway-serving-certificate", "gateway-ca-issuer"),
+            ("gateway-ca-bundle", "trust-manager"),
+            ("gateway-ca-bundle", "gateway-ca-certificate"),
+            ("gateway-ca-configmap", "gateway-ca-bundle"),
+            ("gateway", "gateway-serving-certificate"),
+            ("gateway-client-auth", "gateway"),
+            ("gateway-client-auth", "gateway-client-ca-bundle"),
+        ):
+            if key in self.rsp.desired.resources and dependency_key in self.rsp.desired.resources:
+                response.add_dependency(self.rsp, key, dependency_key)
 
     def serves_gateway(self) -> bool:
         """Whether this cluster's gateway should be serving.
