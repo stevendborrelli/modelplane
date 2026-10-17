@@ -124,7 +124,8 @@ gateway routing, a live request — with no cloud credentials. Add `-- --verify`
 and it runs the pytest suite in `e2e/tests/`, exiting non-zero if a test fails. That
 verify command is what the label-gated `E2E` workflow runs on CI (add the
 `test-e2e` label to a PR), so a green local `--verify` and a green CI run mean
-the same thing. See `e2e/README.md`.
+the same thing. Set `CROSSPLANE_IMAGE` to run against a locally built
+Crossplane rather than the pinned release. See `e2e/README.md`.
 
 ## Submitting changes
 

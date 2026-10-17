@@ -124,6 +124,34 @@ again, use `--test`:
 nix run .#e2e -- --test -k usage
 ```
 
+### Running against a local Crossplane build
+
+`crossplane project run` installs Crossplane from `charts.crossplane.io` by
+version, so a build carrying an unreleased feature can't come in through the
+CLI. Set `CROSSPLANE_IMAGE` to an image already in your Docker daemon, and
+bring-up loads it into the control plane and swaps it into both Crossplane
+Deployments once the chart lands. That's before any Modelplane manifest is
+applied, so no composition ever runs against the released binary:
+
+```bash
+cd ../crossplane && ./nix.sh run .#stream-image | docker load  # prints the tag
+CROSSPLANE_IMAGE=crossplane/crossplane:<tag> \
+  CROSSPLANE_ARGS=--enable-composed-resource-ordering \
+  nix run .#e2e -- --verify
+```
+
+`CROSSPLANE_ARGS` adds arguments to the core container, split on whitespace,
+which is how an alpha feature gets turned on. Composed resource ordering is off
+unless `--enable-composed-resource-ordering` is passed, and the serving stack's
+function fails the pipeline outright when Crossplane doesn't advertise the
+capability. Unset both and the run is exactly what CI does. This swaps the
+image and the arguments only; a local build that also changes CRDs needs its
+`cluster/crds` applied alongside.
+
+The composition functions are a separate matter: they're built from `uv.lock`,
+so the SDK they carry is whatever the lockfile resolves. See the
+`[tool.uv.sources]` note in the root `pyproject.toml`.
+
 `crossplane project run` installs the config and applies the resources, then
 returns; the serving-stack install and model rollout reconcile in the background.
 So wait for the `ModelService` to become ready before curling. The gateway's
@@ -166,7 +194,8 @@ project run` flags can't express:
    label its node for the `gpu-synthetic` pool.
 3. `crossplane project run` for the **control plane**, with
    `lean-control-plane.yaml` as `--init-resources` so the provider trims land
-   before the providers install.
+   before the providers install. With `CROSSPLANE_IMAGE` or `CROSSPLANE_ARGS`
+   set, swap the local build into Crossplane's Deployments.
 4. Finish the setup the getting-started flow does by hand (as the nix run app
    does since #375): `kubectl apply` the RBAC prerequisites, point provider-helm
    and provider-kubernetes at their DeploymentRuntimeConfigs, add the workload

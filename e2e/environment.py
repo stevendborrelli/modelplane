@@ -21,6 +21,10 @@ source: Existing. See README.md.
 
     python -m e2e.environment up [--no-apply]
     python -m e2e.environment down
+
+To run against a locally built Crossplane rather than the pinned release, set
+CROSSPLANE_IMAGE to an image in the host's Docker daemon, and CROSSPLANE_ARGS to
+any arguments to add to it. See README.md.
 """
 
 import argparse
@@ -51,6 +55,18 @@ DEADLOCKING_KUBELETS = ("v1.34.0", "v1.34.1")
 
 METALLB_URL = "https://raw.githubusercontent.com/metallb/metallb/v0.14.8/config/manifests/metallb-native.yaml"
 CROSSPLANE_VERSION = "2.4.0"
+CROSSPLANE_NAMESPACE = "crossplane-system"
+
+# Run against a locally built Crossplane, for a feature that hasn't released.
+# `crossplane project run` installs Crossplane from charts.crossplane.io by
+# version and takes no flag for an image, chart or registry, so a branch build
+# can't come in through the CLI. CROSSPLANE_IMAGE names an image already in the
+# host's Docker daemon, which bring-up loads into the control plane and swaps
+# into both Crossplane Deployments. CROSSPLANE_ARGS adds arguments to the core
+# container, split on whitespace: that's how an alpha feature gets turned on.
+# Unset, the run is exactly what CI does.
+CROSSPLANE_IMAGE_ENV = "CROSSPLANE_IMAGE"
+CROSSPLANE_ARGS_ENV = "CROSSPLANE_ARGS"
 
 MANIFESTS = ROOT / "e2e" / "manifests"
 
@@ -194,6 +210,13 @@ def up_control_plane() -> None:
             env={"DOCKER_CONFIG": docker_config},
         )  # fmt: skip
 
+    # Before anything Modelplane-shaped exists, so no composition ever runs
+    # against the released Crossplane the chart just installed.
+    use_local_crossplane(
+        image=os.environ.get(CROSSPLANE_IMAGE_ENV, ""),
+        args=os.environ.get(CROSSPLANE_ARGS_ENV, "").split(),
+    )
+
     # Finish the setup the install guide does by hand: apply the RBAC
     # prerequisites, then point the two providers at the DeploymentRuntimeConfigs
     # they define. The providers install before prerequisites.yaml, and an
@@ -233,6 +256,65 @@ def up_control_plane() -> None:
         "stringData": {"kubeconfig": output("kind", "get", "kubeconfig", "--internal", f"--name={WORKLOAD}")},
     }
     kubectl(CONTROL_PLANE_CONTEXT, "apply", "--filename=-", stdin=json.dumps(secret))
+
+
+def use_local_crossplane(*, image: str, args: list[str]) -> None:
+    """Swap a locally built Crossplane image, and any extra arguments, into the control plane.
+
+    This swaps the image and the arguments only. A local build that also adds
+    or changes CRDs needs its cluster/crds applied alongside.
+    """
+    if not image and not args:
+        return
+
+    if image:
+        log.info("Swapping in the local Crossplane image %s", image)
+        run("kind", "load", "docker-image", image, f"--name={CONTROL_PLANE}")
+        # By container name rather than index: both Deployments carry an init
+        # container, crossplane-init, and a main container, crossplane,
+        # running the same image. IfNotPresent, so the kubelet uses the loaded
+        # image instead of trying to pull a tag that exists nowhere.
+        for deployment in ("crossplane", "crossplane-rbac-manager"):
+            patch = {
+                "spec": {
+                    "template": {
+                        "spec": {
+                            "initContainers": [
+                                {"name": "crossplane-init", "image": image, "imagePullPolicy": "IfNotPresent"}
+                            ],
+                            "containers": [{"name": "crossplane", "image": image, "imagePullPolicy": "IfNotPresent"}],
+                        }
+                    }
+                }
+            }
+            kubectl(
+                CONTROL_PLANE_CONTEXT,
+                "patch", "deployment", deployment, f"--namespace={CROSSPLANE_NAMESPACE}",
+                f"--patch={json.dumps(patch)}",
+            )  # fmt: skip
+
+    if args:
+        # Appended one at a time with a JSON patch: a strategic merge would
+        # replace the whole list, dropping the chart's `core start`.
+        log.info("Adding Crossplane arguments %s", shlex.join(args))
+        containers = output(
+            "kubectl", f"--context={CONTROL_PLANE_CONTEXT}",
+            "get", "deployment", "crossplane", f"--namespace={CROSSPLANE_NAMESPACE}",
+            "--output=jsonpath={.spec.template.spec.containers[*].name}",
+        ).split()  # fmt: skip
+        index = containers.index("crossplane")
+        patch = [{"op": "add", "path": f"/spec/template/spec/containers/{index}/args/-", "value": a} for a in args]
+        kubectl(
+            CONTROL_PLANE_CONTEXT,
+            "patch", "deployment", "crossplane", f"--namespace={CROSSPLANE_NAMESPACE}",
+            "--type=json", f"--patch={json.dumps(patch)}",
+        )  # fmt: skip
+
+    for deployment in ("crossplane", "crossplane-rbac-manager"):
+        kubectl(
+            CONTROL_PLANE_CONTEXT,
+            "rollout", "status", f"deployment/{deployment}", f"--namespace={CROSSPLANE_NAMESPACE}", "--timeout=5m",
+        )  # fmt: skip
 
 
 def down() -> None:
