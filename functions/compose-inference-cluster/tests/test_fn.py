@@ -331,33 +331,6 @@ def _serving_stack(
     )
 
 
-def _backend_usage(*, cluster_kind: str) -> fnv1.Resource:
-    """The composed Usage holding the cluster_kind cluster XR until the ServingStack is gone."""
-    return fnv1.Resource(
-        resource=resource.dict_to_struct(
-            {
-                "apiVersion": "protection.crossplane.io/v1beta1",
-                "kind": "Usage",
-                "metadata": {"namespace": "modelplane-system"},
-                "spec": {
-                    "of": {
-                        "apiVersion": "infrastructure.modelplane.ai/v1alpha1",
-                        "kind": cluster_kind,
-                        "resourceSelector": {"matchControllerRef": True},
-                    },
-                    "by": {
-                        "apiVersion": "infrastructure.modelplane.ai/v1alpha1",
-                        "kind": "ServingStack",
-                        "resourceSelector": {"matchControllerRef": True},
-                    },
-                    "replayDeletion": True,
-                },
-            }
-        ),
-        ready=fnv1.READY_TRUE,
-    )
-
-
 def _guard_cluster_usage(*, reason: str) -> fnv1.Resource:
     """The reason-only ClusterUsage the deletion guard composes for test-cluster."""
     return fnv1.Resource(
@@ -422,9 +395,13 @@ def _to_dict(msg: message.Message) -> dict:
 # client certificates from each of their CAs, which is how an InferenceGateway
 # proves itself; and the InferenceClass behind each node pool.
 #
+# Every request but NoDependencies advertises CAPABILITY_DEPENDENCIES: the
+# function declares its ordering and leaves Crossplane to enforce it.
+#
 # A cloud cluster's case observes its ManagedResourceActivationPolicy with every
-# kind in status.activated, so the function composes the cluster XR rather than
-# waiting for activation, unless the case says otherwise.
+# kind in status.activated, so the policy counts as ready, unless the case says
+# otherwise. The ClusterProviderConfig and the ServingStack are composed in
+# dependency scopes, which report on the DependencyValuesAvailable condition.
 #
 # gateway-test-cluster-09532.modelplane-system.svc.cluster.local is the internal
 # name Modelplane derives for test-cluster's gateway, which
@@ -434,6 +411,7 @@ COMPOSE_CASES = [
         name="ExistingCluster",
         reason="An Existing cluster composes a ClusterProviderConfig and a ServingStack from its kubeconfig Secret.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(
@@ -519,7 +497,22 @@ COMPOSE_CASES = [
                     "class-gpu-l4": fnv1.ResourceSelector(
                         api_version="modelplane.ai/v1alpha1", kind="InferenceClass", match_name="gpu-l4"
                     ),
+                    "cluster-kubeconfig": fnv1.ResourceSelector(
+                        api_version="v1", kind="Secret", match_name="my-kubeconfig", namespace="modelplane-system"
+                    ),
                 },
+            ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(
+                        resource="cluster-provider-config-kubernetes",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                    fnv1.Dependency(
+                        resource="serving-stack",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                ],
             ),
             conditions=[
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_TRUE, reason="ClusterRunning"),
@@ -531,6 +524,7 @@ COMPOSE_CASES = [
         name="ExistingNonGCPIdentity",
         reason="An Existing cluster threads its non-GCP identity's type into the ClusterProviderConfig and the ServingStack's secrets.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(
@@ -639,7 +633,33 @@ COMPOSE_CASES = [
                     "class-gpu-l4": fnv1.ResourceSelector(
                         api_version="modelplane.ai/v1alpha1", kind="InferenceClass", match_name="gpu-l4"
                     ),
+                    "cluster-kubeconfig": fnv1.ResourceSelector(
+                        api_version="v1", kind="Secret", match_name="my-kubeconfig", namespace="modelplane-system"
+                    ),
+                    "cluster-identity": fnv1.ResourceSelector(
+                        api_version="v1", kind="Secret", match_name="nebius-creds", namespace="modelplane-system"
+                    ),
                 },
+            ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(
+                        resource="cluster-provider-config-kubernetes",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                    fnv1.Dependency(
+                        resource="cluster-provider-config-kubernetes",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-identity"),
+                    ),
+                    fnv1.Dependency(
+                        resource="serving-stack",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                    fnv1.Dependency(
+                        resource="serving-stack",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-identity"),
+                    ),
+                ],
             ),
             conditions=[
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_TRUE, reason="ClusterRunning"),
@@ -651,6 +671,7 @@ COMPOSE_CASES = [
         name="GKEFirstPass",
         reason="With no GKECluster observed yet, a GKE cluster composes only the activation policy and the GKECluster.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(source="GKE", gke=v1alpha1.Gke(region="us-central1")),
@@ -759,7 +780,13 @@ COMPOSE_CASES = [
                     ),
                 },
             ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(resource="gke-cluster", composed_resource="activation"),
+                ],
+            ),
             conditions=[
+                fnv1.Condition(type="DependencyValuesAvailable", status=fnv1.STATUS_CONDITION_TRUE, reason="Available"),
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_FALSE, reason="Provisioning"),
                 fnv1.Condition(type="BackendReady", status=fnv1.STATUS_CONDITION_FALSE, reason="WaitingForCluster"),
             ],
@@ -769,6 +796,7 @@ COMPOSE_CASES = [
         name="GKECredentials",
         reason="A GKE cluster's credentials pass through to the GKECluster's spec.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(
@@ -885,7 +913,13 @@ COMPOSE_CASES = [
                     ),
                 },
             ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(resource="gke-cluster", composed_resource="activation"),
+                ],
+            ),
             conditions=[
+                fnv1.Condition(type="DependencyValuesAvailable", status=fnv1.STATUS_CONDITION_TRUE, reason="Available"),
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_FALSE, reason="Provisioning"),
                 fnv1.Condition(type="BackendReady", status=fnv1.STATUS_CONDITION_FALSE, reason="WaitingForCluster"),
             ],
@@ -895,6 +929,7 @@ COMPOSE_CASES = [
         name="ExistingBackendReady",
         reason="Once its ServingStack is observed Ready with an address, an Existing cluster relays the address and reports its backend healthy.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(
@@ -983,7 +1018,22 @@ COMPOSE_CASES = [
                     "class-gpu-l4": fnv1.ResourceSelector(
                         api_version="modelplane.ai/v1alpha1", kind="InferenceClass", match_name="gpu-l4"
                     ),
+                    "cluster-kubeconfig": fnv1.ResourceSelector(
+                        api_version="v1", kind="Secret", match_name="my-kubeconfig", namespace="modelplane-system"
+                    ),
                 },
+            ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(
+                        resource="cluster-provider-config-kubernetes",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                    fnv1.Dependency(
+                        resource="serving-stack",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                ],
             ),
             conditions=[
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_TRUE, reason="ClusterRunning"),
@@ -995,6 +1045,7 @@ COMPOSE_CASES = [
         name="EKSFirstPass",
         reason="With no EKSCluster observed yet, an EKS cluster composes only the activation policy and the EKSCluster.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(source="EKS", eks=v1alpha1.Eks(region="us-west-2")),
@@ -1136,19 +1187,28 @@ COMPOSE_CASES = [
                     ),
                 },
             ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(resource="eks-cluster", composed_resource="activation"),
+                ],
+            ),
             conditions=[
+                fnv1.Condition(type="DependencyValuesAvailable", status=fnv1.STATUS_CONDITION_TRUE, reason="Available"),
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_FALSE, reason="Provisioning"),
                 fnv1.Condition(type="BackendReady", status=fnv1.STATUS_CONDITION_FALSE, reason="WaitingForCluster"),
             ],
         ),
     ),
-    # The ClusterProviderConfig is built only from the kubeconfig, so it's
-    # recreated once the kubeconfig is observed again. It is never emitted with
-    # an empty secretRef.
+    # The ClusterProviderConfig is built from the cluster's status.secrets. One
+    # that exists while the cluster isn't publishing them is kept at its current
+    # spec rather than left out of desired state, which would delete a
+    # ProviderConfig ModelReplicas use. It is never emitted with an empty
+    # secretRef.
     ComposeCase(
         name="EKSObservedCPC",
-        reason="With a ClusterProviderConfig observed but no EKSCluster yet, an EKS cluster leaves the ClusterProviderConfig out of desired state.",
+        reason="With a ClusterProviderConfig observed but no EKSCluster yet, an EKS cluster keeps the ClusterProviderConfig at its current spec and says so.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(source="EKS", eks=v1alpha1.Eks(region="us-west-2")),
@@ -1287,6 +1347,26 @@ COMPOSE_CASES = [
                         fabric=None,
                         ready=fnv1.READY_UNSPECIFIED,
                     ),
+                    # Kept as observed, so not marked ready.
+                    "cluster-provider-config-kubernetes": fnv1.Resource(
+                        resource=resource.dict_to_struct(
+                            {
+                                "apiVersion": "kubernetes.m.crossplane.io/v1alpha1",
+                                "kind": "ClusterProviderConfig",
+                                "metadata": {"name": "test-cluster-cluster-kubeconfig-d0f89"},
+                                "spec": {
+                                    "credentials": {
+                                        "source": "Secret",
+                                        "secretRef": {
+                                            "namespace": "modelplane-system",
+                                            "name": "test-cluster-kubeconfig-abcde",
+                                            "key": "kubeconfig",
+                                        },
+                                    },
+                                },
+                            }
+                        ),
+                    ),
                 },
             ),
             context=structpb.Struct(),
@@ -1309,7 +1389,19 @@ COMPOSE_CASES = [
                     ),
                 },
             ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(resource="eks-cluster", composed_resource="activation"),
+                    fnv1.Dependency(resource="cluster-provider-config-kubernetes", composed_resource="eks-cluster"),
+                ],
+            ),
             conditions=[
+                fnv1.Condition(
+                    type="DependencyValuesAvailable",
+                    status=fnv1.STATUS_CONDITION_FALSE,
+                    reason="KeptCurrentSpec",
+                    message="cluster-provider-config-kubernetes kept its current spec: eks-cluster.status.secrets isn't available",
+                ),
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_FALSE, reason="Provisioning"),
                 fnv1.Condition(type="BackendReady", status=fnv1.STATUS_CONDITION_FALSE, reason="WaitingForCluster"),
             ],
@@ -1319,8 +1411,9 @@ COMPOSE_CASES = [
     # identity on the ClusterProviderConfig.
     ComposeCase(
         name="GKEReady",
-        reason="Once its GKECluster is Ready, a GKE cluster composes the ClusterProviderConfig, ServingStack and Usage, and relays its RWX StorageClass.",
+        reason="Once its GKECluster is Ready, a GKE cluster composes the ClusterProviderConfig and ServingStack, both depending on the cluster XR, and relays its RWX StorageClass.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(source="GKE", gke=v1alpha1.Gke(region="us-central1")),
@@ -1469,7 +1562,6 @@ COMPOSE_CASES = [
                         gpu=None,
                         ready=fnv1.READY_UNSPECIFIED,
                     ),
-                    "usage-gke-by-backend": _backend_usage(cluster_kind="GKECluster"),
                 },
             ),
             results=[fnv1.Result(severity=fnv1.SEVERITY_NORMAL, message="GKE cluster ready, composing backend")],
@@ -1493,7 +1585,237 @@ COMPOSE_CASES = [
                     ),
                 },
             ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(resource="gke-cluster", composed_resource="activation"),
+                    fnv1.Dependency(resource="cluster-provider-config-kubernetes", composed_resource="gke-cluster"),
+                    fnv1.Dependency(resource="serving-stack", composed_resource="gke-cluster"),
+                ],
+            ),
             conditions=[
+                fnv1.Condition(type="DependencyValuesAvailable", status=fnv1.STATUS_CONDITION_TRUE, reason="Available"),
+                fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_TRUE, reason="ClusterRunning"),
+                fnv1.Condition(type="BackendReady", status=fnv1.STATUS_CONDITION_FALSE, reason="Installing"),
+            ],
+        ),
+    ),
+    # The ServingStack is built from the GKECluster's status.secrets. Once it
+    # exists, losing them keeps its current spec rather than leaving it out of
+    # desired state, which would delete the serving stack. No
+    # ClusterProviderConfig exists, so there is none to keep and none composed.
+    ComposeCase(
+        name="GKESecretsWithdrawn",
+        reason="With its ServingStack observed and its GKECluster no longer publishing Secrets, a GKE cluster keeps the ServingStack at its current spec and says so.",
+        req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
+            observed=fnv1.State(
+                composite=_inference_cluster(
+                    cluster=v1alpha1.Cluster(source="GKE", gke=v1alpha1.Gke(region="us-central1")),
+                    node_pools=[
+                        v1alpha1.NodePool(
+                            name="l4-pool",
+                            className="gpu-l4",
+                            nodeCount=2,
+                            maxNodeCount=4,
+                            zones=["us-central1-a"],
+                        ),
+                    ],
+                ),
+                resources={
+                    "gke-cluster": fnv1.Resource(
+                        resource=resource.dict_to_struct(
+                            {
+                                "apiVersion": "infrastructure.modelplane.ai/v1alpha1",
+                                "kind": "GKECluster",
+                                "metadata": {"name": "test-cluster", "namespace": "modelplane-system"},
+                                "spec": {
+                                    "region": "us-central1",
+                                    "nodePools": [{"name": "system", "role": "System", "machineType": "e2-standard-4"}],
+                                },
+                                "status": {
+                                    "conditions": [
+                                        {
+                                            "type": "Ready",
+                                            "status": "True",
+                                            "reason": "Available",
+                                            "lastTransitionTime": "2026-06-08T00:00:00Z",
+                                        },
+                                    ],
+                                    "cache": {"storageClassName": "modelplane-rwx"},
+                                },
+                            }
+                        ),
+                    ),
+                    "serving-stack": fnv1.Resource(
+                        resource=resource.dict_to_struct(
+                            {
+                                "apiVersion": "infrastructure.modelplane.ai/v1alpha1",
+                                "kind": "ServingStack",
+                                "metadata": {
+                                    "name": "test-cluster-serving-stack-fd00b",
+                                    "namespace": "modelplane-system",
+                                },
+                                "spec": {
+                                    "cloud": "GKE",
+                                    "gateway": {
+                                        "hostname": "gateway-test-cluster-09532.modelplane-system.svc.cluster.local"
+                                    },
+                                    "stack": "Standard",
+                                    "secrets": [
+                                        {
+                                            "type": "Kubeconfig",
+                                            "name": "test-cluster-kubeconfig-abcde",
+                                            "key": "kubeconfig",
+                                        },
+                                        {
+                                            "type": "GoogleApplicationCredentials",
+                                            "name": "test-cluster-sa-key-fghij",
+                                            "key": "credentials.json",
+                                        },
+                                    ],
+                                },
+                            }
+                        ),
+                    ),
+                    "activation": _observed_activation_policy(
+                        activated=[
+                            "projectiammembers.cloudplatform.gcp.m.upbound.io",
+                            "projectservices.cloudplatform.gcp.m.upbound.io",
+                            "serviceaccounts.cloudplatform.gcp.m.upbound.io",
+                            "serviceaccountkeys.cloudplatform.gcp.m.upbound.io",
+                            "networks.compute.gcp.m.upbound.io",
+                            "subnetworks.compute.gcp.m.upbound.io",
+                            "clusters.container.gcp.m.upbound.io",
+                            "nodepools.container.gcp.m.upbound.io",
+                        ]
+                    ),
+                },
+            ),
+            required_resources={
+                "class-gpu-l4": fnv1.Resources(
+                    items=[
+                        _inference_class(
+                            name="gpu-l4",
+                            count=1,
+                            memory="24Gi",
+                            provisioning={
+                                "provider": "GKE",
+                                "gke": {
+                                    "machineType": "g2-standard-48",
+                                    "diskSizeGb": 100,
+                                    "accelerator": {"type": "nvidia-l4", "count": 1},
+                                },
+                            },
+                        ),
+                    ],
+                ),
+            },
+        ),
+        want=fnv1.RunFunctionResponse(
+            meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
+            desired=fnv1.State(
+                composite=_desired_inference_cluster(
+                    gpu_pools=[
+                        {
+                            "name": "l4-pool",
+                            "nodes": 4,
+                            "devices": [
+                                {
+                                    "name": "gpu",
+                                    "claim": "DRA",
+                                    "driver": "gpu.nvidia.com",
+                                    "deviceClassName": "gpu.nvidia.com",
+                                    "count": 1,
+                                    "capacity": {"memory": {"value": "24Gi"}},
+                                },
+                            ],
+                        },
+                    ],
+                    cache={"storageClassName": "modelplane-rwx"},
+                    gateway=None,
+                ),
+                resources={
+                    "activation": _activation_policy(
+                        activate=[
+                            "projectiammembers.cloudplatform.gcp.m.upbound.io",
+                            "projectservices.cloudplatform.gcp.m.upbound.io",
+                            "serviceaccounts.cloudplatform.gcp.m.upbound.io",
+                            "serviceaccountkeys.cloudplatform.gcp.m.upbound.io",
+                            "networks.compute.gcp.m.upbound.io",
+                            "subnetworks.compute.gcp.m.upbound.io",
+                            "clusters.container.gcp.m.upbound.io",
+                            "nodepools.container.gcp.m.upbound.io",
+                        ],
+                        ready=fnv1.READY_TRUE,
+                    ),
+                    "gke-cluster": _gke_cluster(credentials=None, ready=fnv1.READY_TRUE),
+                    # Kept as observed. It reports no Ready condition yet, so it isn't marked ready.
+                    "serving-stack": fnv1.Resource(
+                        resource=resource.dict_to_struct(
+                            {
+                                "apiVersion": "infrastructure.modelplane.ai/v1alpha1",
+                                "kind": "ServingStack",
+                                "metadata": {
+                                    "name": "test-cluster-serving-stack-fd00b",
+                                    "namespace": "modelplane-system",
+                                },
+                                "spec": {
+                                    "cloud": "GKE",
+                                    "gateway": {
+                                        "hostname": "gateway-test-cluster-09532.modelplane-system.svc.cluster.local"
+                                    },
+                                    "stack": "Standard",
+                                    "secrets": [
+                                        {
+                                            "type": "Kubeconfig",
+                                            "name": "test-cluster-kubeconfig-abcde",
+                                            "key": "kubeconfig",
+                                        },
+                                        {
+                                            "type": "GoogleApplicationCredentials",
+                                            "name": "test-cluster-sa-key-fghij",
+                                            "key": "credentials.json",
+                                        },
+                                    ],
+                                },
+                            }
+                        ),
+                    ),
+                },
+            ),
+            context=structpb.Struct(),
+            requirements=fnv1.Requirements(
+                resources={
+                    "model-replicas": fnv1.ResourceSelector(
+                        api_version="modelplane.ai/v1alpha1",
+                        kind="ModelReplica",
+                        match_labels=fnv1.MatchLabels(labels={"modelplane.ai/cluster": "test-cluster"}),
+                    ),
+                    "model-routes": fnv1.ResourceSelector(
+                        api_version="modelplane.ai/v1alpha1",
+                        kind="ModelRoute",
+                        match_labels=fnv1.MatchLabels(labels={"modelplane.ai/cluster": "test-cluster"}),
+                    ),
+                    "model-caches": fnv1.ResourceSelector(api_version="modelplane.ai/v1alpha1", kind="ModelCache"),
+                    "gateways": fnv1.ResourceSelector(api_version="modelplane.ai/v1alpha1", kind="InferenceGateway"),
+                    "class-gpu-l4": fnv1.ResourceSelector(
+                        api_version="modelplane.ai/v1alpha1", kind="InferenceClass", match_name="gpu-l4"
+                    ),
+                },
+            ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(resource="gke-cluster", composed_resource="activation"),
+                    fnv1.Dependency(resource="serving-stack", composed_resource="gke-cluster"),
+                ],
+            ),
+            conditions=[
+                fnv1.Condition(
+                    type="DependencyValuesAvailable",
+                    status=fnv1.STATUS_CONDITION_FALSE,
+                    reason="KeptCurrentSpec",
+                    message="serving-stack kept its current spec: gke-cluster.status.secrets isn't available",
+                ),
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_TRUE, reason="ClusterRunning"),
                 fnv1.Condition(type="BackendReady", status=fnv1.STATUS_CONDITION_FALSE, reason="Installing"),
             ],
@@ -1501,8 +1823,9 @@ COMPOSE_CASES = [
     ),
     ComposeCase(
         name="EKSReady",
-        reason="Once its EKSCluster is Ready, an EKS cluster composes the ClusterProviderConfig, ServingStack and Usage, and relays its status.cache.",
+        reason="Once its EKSCluster is Ready, an EKS cluster composes the ClusterProviderConfig and ServingStack, both depending on the cluster XR, and relays its status.cache.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(source="EKS", eks=v1alpha1.Eks(region="us-west-2")),
@@ -1662,7 +1985,6 @@ COMPOSE_CASES = [
                         gpu=None,
                         ready=fnv1.READY_UNSPECIFIED,
                     ),
-                    "usage-eks-by-backend": _backend_usage(cluster_kind="EKSCluster"),
                 },
             ),
             results=[fnv1.Result(severity=fnv1.SEVERITY_NORMAL, message="EKS cluster ready, composing backend")],
@@ -1686,7 +2008,15 @@ COMPOSE_CASES = [
                     ),
                 },
             ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(resource="eks-cluster", composed_resource="activation"),
+                    fnv1.Dependency(resource="cluster-provider-config-kubernetes", composed_resource="eks-cluster"),
+                    fnv1.Dependency(resource="serving-stack", composed_resource="eks-cluster"),
+                ],
+            ),
             conditions=[
+                fnv1.Condition(type="DependencyValuesAvailable", status=fnv1.STATUS_CONDITION_TRUE, reason="Available"),
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_TRUE, reason="ClusterRunning"),
                 fnv1.Condition(type="BackendReady", status=fnv1.STATUS_CONDITION_FALSE, reason="Installing"),
             ],
@@ -1698,6 +2028,7 @@ COMPOSE_CASES = [
         name="EKSCapacityBlock",
         reason="A node pool backed by a Capacity Block passes its reservation ID through to the EKSCluster pool's capacityBlock.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(source="EKS", eks=v1alpha1.Eks(region="us-west-2")),
@@ -1842,7 +2173,13 @@ COMPOSE_CASES = [
                     ),
                 },
             ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(resource="eks-cluster", composed_resource="activation"),
+                ],
+            ),
             conditions=[
+                fnv1.Condition(type="DependencyValuesAvailable", status=fnv1.STATUS_CONDITION_TRUE, reason="Available"),
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_FALSE, reason="Provisioning"),
                 fnv1.Condition(type="BackendReady", status=fnv1.STATUS_CONDITION_FALSE, reason="WaitingForCluster"),
             ],
@@ -1854,6 +2191,7 @@ COMPOSE_CASES = [
         name="EKSFabricEFA",
         reason="A node pool that opts into the EFA fabric passes fabric.type through to the EKSCluster pool.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(source="EKS", eks=v1alpha1.Eks(region="us-west-2")),
@@ -1993,7 +2331,13 @@ COMPOSE_CASES = [
                     ),
                 },
             ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(resource="eks-cluster", composed_resource="activation"),
+                ],
+            ),
             conditions=[
+                fnv1.Condition(type="DependencyValuesAvailable", status=fnv1.STATUS_CONDITION_TRUE, reason="Available"),
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_FALSE, reason="Provisioning"),
                 fnv1.Condition(type="BackendReady", status=fnv1.STATUS_CONDITION_FALSE, reason="WaitingForCluster"),
             ],
@@ -2005,6 +2349,7 @@ COMPOSE_CASES = [
         name="NebiusFirstPass",
         reason="With no NebiusCluster observed yet, a Nebius cluster composes only the activation policy and a NebiusCluster carrying its pool's InfiniBand fabric.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(source="Nebius", nebius=v1alpha1.Nebius()),
@@ -2137,7 +2482,13 @@ COMPOSE_CASES = [
                     ),
                 },
             ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(resource="nebius-cluster", composed_resource="activation"),
+                ],
+            ),
             conditions=[
+                fnv1.Condition(type="DependencyValuesAvailable", status=fnv1.STATUS_CONDITION_TRUE, reason="Available"),
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_FALSE, reason="Provisioning"),
                 fnv1.Condition(type="BackendReady", status=fnv1.STATUS_CONDITION_FALSE, reason="WaitingForCluster"),
             ],
@@ -2148,8 +2499,9 @@ COMPOSE_CASES = [
     # ClusterProviderConfig's Secret, which lives outside modelplane-system.
     ComposeCase(
         name="NebiusReady",
-        reason="Once its NebiusCluster is Ready, a Nebius cluster composes a ClusterProviderConfig with the Nebius identity, the ServingStack and the Usage.",
+        reason="Once its NebiusCluster is Ready, a Nebius cluster composes a ClusterProviderConfig with the Nebius identity, the ServingStack, both depending on the cluster XR.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(source="Nebius", nebius=v1alpha1.Nebius()),
@@ -2331,7 +2683,6 @@ COMPOSE_CASES = [
                         gpu=None,
                         ready=fnv1.READY_UNSPECIFIED,
                     ),
-                    "usage-nebius-by-backend": _backend_usage(cluster_kind="NebiusCluster"),
                 },
             ),
             results=[fnv1.Result(severity=fnv1.SEVERITY_NORMAL, message="Nebius cluster ready, composing backend")],
@@ -2355,7 +2706,15 @@ COMPOSE_CASES = [
                     ),
                 },
             ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(resource="nebius-cluster", composed_resource="activation"),
+                    fnv1.Dependency(resource="cluster-provider-config-kubernetes", composed_resource="nebius-cluster"),
+                    fnv1.Dependency(resource="serving-stack", composed_resource="nebius-cluster"),
+                ],
+            ),
             conditions=[
+                fnv1.Condition(type="DependencyValuesAvailable", status=fnv1.STATUS_CONDITION_TRUE, reason="Available"),
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_TRUE, reason="ClusterRunning"),
                 fnv1.Condition(type="BackendReady", status=fnv1.STATUS_CONDITION_FALSE, reason="Installing"),
             ],
@@ -2368,6 +2727,7 @@ COMPOSE_CASES = [
         name="AKSFirstPass",
         reason="With no AKSCluster observed yet, an AKS cluster composes only the activation policy and an AKSCluster carrying its pool's fabric and minNodeCount.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(source="AKS", aks=v1alpha1.Aks(location="westeurope")),
@@ -2496,7 +2856,13 @@ COMPOSE_CASES = [
                     ),
                 },
             ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(resource="aks-cluster", composed_resource="activation"),
+                ],
+            ),
             conditions=[
+                fnv1.Condition(type="DependencyValuesAvailable", status=fnv1.STATUS_CONDITION_TRUE, reason="Available"),
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_FALSE, reason="Provisioning"),
                 fnv1.Condition(type="BackendReady", status=fnv1.STATUS_CONDITION_FALSE, reason="WaitingForCluster"),
             ],
@@ -2506,8 +2872,9 @@ COMPOSE_CASES = [
     # carries no identity (unlike GKE and Nebius).
     ComposeCase(
         name="AKSReady",
-        reason="Once its AKSCluster is Ready, an AKS cluster composes a ClusterProviderConfig without identity, the ServingStack and the Usage, and relays its status.cache.",
+        reason="Once its AKSCluster is Ready, an AKS cluster composes a ClusterProviderConfig without identity, the ServingStack, both depending on the cluster XR, and relays its status.cache.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(source="AKS", aks=v1alpha1.Aks(location="westeurope")),
@@ -2663,7 +3030,6 @@ COMPOSE_CASES = [
                         gpu=None,
                         ready=fnv1.READY_UNSPECIFIED,
                     ),
-                    "usage-aks-by-backend": _backend_usage(cluster_kind="AKSCluster"),
                 },
             ),
             results=[fnv1.Result(severity=fnv1.SEVERITY_NORMAL, message="AKS cluster ready, composing backend")],
@@ -2687,21 +3053,30 @@ COMPOSE_CASES = [
                     ),
                 },
             ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(resource="aks-cluster", composed_resource="activation"),
+                    fnv1.Dependency(resource="cluster-provider-config-kubernetes", composed_resource="aks-cluster"),
+                    fnv1.Dependency(resource="serving-stack", composed_resource="aks-cluster"),
+                ],
+            ),
             conditions=[
+                fnv1.Condition(type="DependencyValuesAvailable", status=fnv1.STATUS_CONDITION_TRUE, reason="Available"),
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_TRUE, reason="ClusterRunning"),
                 fnv1.Condition(type="BackendReady", status=fnv1.STATUS_CONDITION_FALSE, reason="Installing"),
             ],
         ),
     ),
     # A kind is missing while, for example, a provider is still installing.
-    # Leaving the policy not ready keeps the composite from reporting ready.
-    # Observing the policy with one kind missing, here
+    # Leaving the policy not ready keeps the composite from reporting ready, and
+    # holds back the GKECluster, which depends on it. Observing the policy with one kind missing, here
     # nodepools.container.gcp.m.upbound.io, exercises the all-kinds check rather
     # than the policy-absent branch.
     ComposeCase(
         name="KindNotActivated",
-        reason="While its activation policy is missing one kind and no GKECluster is observed, a GKE cluster composes only the policy, not ready.",
+        reason="While its activation policy is missing one kind and no GKECluster is observed, a GKE cluster composes the policy, not ready, and the GKECluster that waits on it.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(source="GKE", gke=v1alpha1.Gke(region="us-central1")),
@@ -2786,6 +3161,7 @@ COMPOSE_CASES = [
                         ],
                         ready=fnv1.READY_UNSPECIFIED,
                     ),
+                    "gke-cluster": _gke_cluster(credentials=None, ready=fnv1.READY_UNSPECIFIED),
                 },
             ),
             context=structpb.Struct(),
@@ -2808,19 +3184,26 @@ COMPOSE_CASES = [
                     ),
                 },
             ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(resource="gke-cluster", composed_resource="activation"),
+                ],
+            ),
             conditions=[
+                fnv1.Condition(type="DependencyValuesAvailable", status=fnv1.STATUS_CONDITION_TRUE, reason="Available"),
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_FALSE, reason="Provisioning"),
                 fnv1.Condition(type="BackendReady", status=fnv1.STATUS_CONDITION_FALSE, reason="WaitingForCluster"),
             ],
         ),
     ),
-    # Once the cluster is observed, the function keeps composing it even when
-    # its activation policy isn't observed, so an activation blip never drops a
-    # provisioned cluster from desired state.
+    # Once the cluster is observed, its activation policy counts as ready even
+    # when the policy isn't observed, so an activation blip doesn't flip the
+    # composite's readiness.
     ComposeCase(
         name="ActivationBlip",
         reason="With its GKECluster observed but no activation policy, a GKE cluster keeps composing the GKECluster and everything built on it.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(source="GKE", gke=v1alpha1.Gke(region="us-central1")),
@@ -2957,7 +3340,6 @@ COMPOSE_CASES = [
                         gpu=None,
                         ready=fnv1.READY_UNSPECIFIED,
                     ),
-                    "usage-gke-by-backend": _backend_usage(cluster_kind="GKECluster"),
                 },
             ),
             results=[fnv1.Result(severity=fnv1.SEVERITY_NORMAL, message="GKE cluster ready, composing backend")],
@@ -2981,7 +3363,15 @@ COMPOSE_CASES = [
                     ),
                 },
             ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(resource="gke-cluster", composed_resource="activation"),
+                    fnv1.Dependency(resource="cluster-provider-config-kubernetes", composed_resource="gke-cluster"),
+                    fnv1.Dependency(resource="serving-stack", composed_resource="gke-cluster"),
+                ],
+            ),
             conditions=[
+                fnv1.Condition(type="DependencyValuesAvailable", status=fnv1.STATUS_CONDITION_TRUE, reason="Available"),
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_TRUE, reason="ClusterRunning"),
                 fnv1.Condition(type="BackendReady", status=fnv1.STATUS_CONDITION_FALSE, reason="Installing"),
             ],
@@ -2993,6 +3383,7 @@ COMPOSE_CASES = [
         name="VultrFirstPass",
         reason="With no VultrCluster observed yet, a Vultr cluster composes only the activation policy and the VultrCluster.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(source="Vultr", vultr=v1alpha1.Vultr(region="ewr")),
@@ -3076,7 +3467,13 @@ COMPOSE_CASES = [
                     ),
                 },
             ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(resource="vultr-cluster", composed_resource="activation"),
+                ],
+            ),
             conditions=[
+                fnv1.Condition(type="DependencyValuesAvailable", status=fnv1.STATUS_CONDITION_TRUE, reason="Available"),
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_FALSE, reason="Provisioning"),
                 fnv1.Condition(type="BackendReady", status=fnv1.STATUS_CONDITION_FALSE, reason="WaitingForCluster"),
             ],
@@ -3086,6 +3483,7 @@ COMPOSE_CASES = [
         name="VultrCredentials",
         reason="A Vultr cluster's credentials pass through to the VultrCluster's spec.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(
@@ -3177,7 +3575,13 @@ COMPOSE_CASES = [
                     ),
                 },
             ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(resource="vultr-cluster", composed_resource="activation"),
+                ],
+            ),
             conditions=[
+                fnv1.Condition(type="DependencyValuesAvailable", status=fnv1.STATUS_CONDITION_TRUE, reason="Available"),
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_FALSE, reason="Provisioning"),
                 fnv1.Condition(type="BackendReady", status=fnv1.STATUS_CONDITION_FALSE, reason="WaitingForCluster"),
             ],
@@ -3188,8 +3592,9 @@ COMPOSE_CASES = [
     # reports no cache StorageClass, so status.cache stays unset.
     ComposeCase(
         name="VultrReady",
-        reason="Once its VultrCluster is Ready, a Vultr cluster composes a ClusterProviderConfig without identity, the ServingStack and the Usage.",
+        reason="Once its VultrCluster is Ready, a Vultr cluster composes a ClusterProviderConfig without identity, the ServingStack, both depending on the cluster XR.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(source="Vultr", vultr=v1alpha1.Vultr(region="ewr")),
@@ -3298,7 +3703,6 @@ COMPOSE_CASES = [
                         gpu=None,
                         ready=fnv1.READY_UNSPECIFIED,
                     ),
-                    "usage-vultr-by-backend": _backend_usage(cluster_kind="VultrCluster"),
                 },
             ),
             results=[fnv1.Result(severity=fnv1.SEVERITY_NORMAL, message="Vultr cluster ready, composing backend")],
@@ -3322,7 +3726,15 @@ COMPOSE_CASES = [
                     ),
                 },
             ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(resource="vultr-cluster", composed_resource="activation"),
+                    fnv1.Dependency(resource="cluster-provider-config-kubernetes", composed_resource="vultr-cluster"),
+                    fnv1.Dependency(resource="serving-stack", composed_resource="vultr-cluster"),
+                ],
+            ),
             conditions=[
+                fnv1.Condition(type="DependencyValuesAvailable", status=fnv1.STATUS_CONDITION_TRUE, reason="Available"),
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_TRUE, reason="ClusterRunning"),
                 fnv1.Condition(type="BackendReady", status=fnv1.STATUS_CONDITION_FALSE, reason="Installing"),
             ],
@@ -3334,6 +3746,7 @@ COMPOSE_CASES = [
         name="CivoFirstPass",
         reason="With no CivoCluster observed yet, a Civo cluster composes only the activation policy and the CivoCluster.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(source="Civo", civo=v1alpha1.Civo(region="LON1")),
@@ -3440,7 +3853,13 @@ COMPOSE_CASES = [
                     ),
                 },
             ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(resource="civo-cluster", composed_resource="activation"),
+                ],
+            ),
             conditions=[
+                fnv1.Condition(type="DependencyValuesAvailable", status=fnv1.STATUS_CONDITION_TRUE, reason="Available"),
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_FALSE, reason="Provisioning"),
                 fnv1.Condition(type="BackendReady", status=fnv1.STATUS_CONDITION_FALSE, reason="WaitingForCluster"),
             ],
@@ -3450,6 +3869,7 @@ COMPOSE_CASES = [
         name="CivoCredentials",
         reason="A Civo cluster's credentials pass through to the CivoCluster's spec.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(
@@ -3562,7 +3982,13 @@ COMPOSE_CASES = [
                     ),
                 },
             ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(resource="civo-cluster", composed_resource="activation"),
+                ],
+            ),
             conditions=[
+                fnv1.Condition(type="DependencyValuesAvailable", status=fnv1.STATUS_CONDITION_TRUE, reason="Available"),
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_FALSE, reason="Provisioning"),
                 fnv1.Condition(type="BackendReady", status=fnv1.STATUS_CONDITION_FALSE, reason="WaitingForCluster"),
             ],
@@ -3573,8 +3999,9 @@ COMPOSE_CASES = [
     # reports no cache StorageClass, so status.cache stays unset.
     ComposeCase(
         name="CivoReady",
-        reason="Once its CivoCluster is Ready, a Civo cluster composes a ClusterProviderConfig without identity, the ServingStack and the Usage.",
+        reason="Once its CivoCluster is Ready, a Civo cluster composes a ClusterProviderConfig without identity, the ServingStack, both depending on the cluster XR.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(source="Civo", civo=v1alpha1.Civo(region="LON1")),
@@ -3706,7 +4133,6 @@ COMPOSE_CASES = [
                         gpu=None,
                         ready=fnv1.READY_UNSPECIFIED,
                     ),
-                    "usage-civo-by-backend": _backend_usage(cluster_kind="CivoCluster"),
                 },
             ),
             results=[fnv1.Result(severity=fnv1.SEVERITY_NORMAL, message="Civo cluster ready, composing backend")],
@@ -3730,7 +4156,15 @@ COMPOSE_CASES = [
                     ),
                 },
             ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(resource="civo-cluster", composed_resource="activation"),
+                    fnv1.Dependency(resource="cluster-provider-config-kubernetes", composed_resource="civo-cluster"),
+                    fnv1.Dependency(resource="serving-stack", composed_resource="civo-cluster"),
+                ],
+            ),
             conditions=[
+                fnv1.Condition(type="DependencyValuesAvailable", status=fnv1.STATUS_CONDITION_TRUE, reason="Available"),
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_TRUE, reason="ClusterRunning"),
                 fnv1.Condition(type="BackendReady", status=fnv1.STATUS_CONDITION_FALSE, reason="Installing"),
             ],
@@ -3747,6 +4181,7 @@ COMPOSE_CASES = [
         name="CivoSingleH100",
         reason="Once its CivoCluster is Ready, a Civo cluster whose pool has one H100 per node disables NVLink for that pool in the ServingStack's spec.gpu.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(source="Civo", civo=v1alpha1.Civo(region="LON1")),
@@ -3893,7 +4328,6 @@ COMPOSE_CASES = [
                         gpu={"pools": [{"name": "h100-pool", "disableNvLink": True}]},
                         ready=fnv1.READY_UNSPECIFIED,
                     ),
-                    "usage-civo-by-backend": _backend_usage(cluster_kind="CivoCluster"),
                 },
             ),
             results=[fnv1.Result(severity=fnv1.SEVERITY_NORMAL, message="Civo cluster ready, composing backend")],
@@ -3917,7 +4351,15 @@ COMPOSE_CASES = [
                     ),
                 },
             ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(resource="civo-cluster", composed_resource="activation"),
+                    fnv1.Dependency(resource="cluster-provider-config-kubernetes", composed_resource="civo-cluster"),
+                    fnv1.Dependency(resource="serving-stack", composed_resource="civo-cluster"),
+                ],
+            ),
             conditions=[
+                fnv1.Condition(type="DependencyValuesAvailable", status=fnv1.STATUS_CONDITION_TRUE, reason="Available"),
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_TRUE, reason="ClusterRunning"),
                 fnv1.Condition(type="BackendReady", status=fnv1.STATUS_CONDITION_FALSE, reason="Installing"),
             ],
@@ -3936,6 +4378,7 @@ COMPOSE_CASES = [
         name="ReplicasRoutesAndCaches",
         reason="ModelReplicas, ModelRoutes and ModelCaches across namespaces compose one ClusterUsage naming each kind, and mirror the namespaces that land here.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(
@@ -4094,7 +4537,34 @@ COMPOSE_CASES = [
                     "class-gpu-l4": fnv1.ResourceSelector(
                         api_version="modelplane.ai/v1alpha1", kind="InferenceClass", match_name="gpu-l4"
                     ),
+                    "cluster-kubeconfig": fnv1.ResourceSelector(
+                        api_version="v1", kind="Secret", match_name="my-kubeconfig", namespace="modelplane-system"
+                    ),
                 },
+            ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(
+                        resource="cluster-provider-config-kubernetes",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                    fnv1.Dependency(
+                        resource="serving-stack",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                    fnv1.Dependency(
+                        resource="namespace-team-a", composed_resource="cluster-provider-config-kubernetes"
+                    ),
+                    fnv1.Dependency(
+                        resource="namespace-team-b", composed_resource="cluster-provider-config-kubernetes"
+                    ),
+                    fnv1.Dependency(
+                        resource="namespace-team-c", composed_resource="cluster-provider-config-kubernetes"
+                    ),
+                    fnv1.Dependency(
+                        resource="namespace-team-d", composed_resource="cluster-provider-config-kubernetes"
+                    ),
+                ],
             ),
             conditions=[
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_TRUE, reason="ClusterRunning"),
@@ -4108,6 +4578,7 @@ COMPOSE_CASES = [
         name="RouteOnCluster",
         reason="A ModelRoute on the cluster, with no replica there, composes the guard and mirrors its team's namespace.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(
@@ -4212,7 +4683,25 @@ COMPOSE_CASES = [
                     "class-gpu-l4": fnv1.ResourceSelector(
                         api_version="modelplane.ai/v1alpha1", kind="InferenceClass", match_name="gpu-l4"
                     ),
+                    "cluster-kubeconfig": fnv1.ResourceSelector(
+                        api_version="v1", kind="Secret", match_name="my-kubeconfig", namespace="modelplane-system"
+                    ),
                 },
+            ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(
+                        resource="cluster-provider-config-kubernetes",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                    fnv1.Dependency(
+                        resource="serving-stack",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                    fnv1.Dependency(
+                        resource="namespace-team-c", composed_resource="cluster-provider-config-kubernetes"
+                    ),
+                ],
             ),
             conditions=[
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_TRUE, reason="ClusterRunning"),
@@ -4226,6 +4715,7 @@ COMPOSE_CASES = [
         name="CacheOnCluster",
         reason="A ModelCache staging onto the cluster, with no replica there, composes the guard and mirrors its team's namespace.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(
@@ -4316,7 +4806,25 @@ COMPOSE_CASES = [
                     "class-gpu-l4": fnv1.ResourceSelector(
                         api_version="modelplane.ai/v1alpha1", kind="InferenceClass", match_name="gpu-l4"
                     ),
+                    "cluster-kubeconfig": fnv1.ResourceSelector(
+                        api_version="v1", kind="Secret", match_name="my-kubeconfig", namespace="modelplane-system"
+                    ),
                 },
+            ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(
+                        resource="cluster-provider-config-kubernetes",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                    fnv1.Dependency(
+                        resource="serving-stack",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                    fnv1.Dependency(
+                        resource="namespace-team-d", composed_resource="cluster-provider-config-kubernetes"
+                    ),
+                ],
             ),
             conditions=[
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_TRUE, reason="ClusterRunning"),
@@ -4331,6 +4839,7 @@ COMPOSE_CASES = [
         name="GatewayOnCluster",
         reason="An InferenceGateway on the cluster composes the guard but mirrors no namespace.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(
@@ -4420,7 +4929,22 @@ COMPOSE_CASES = [
                     "class-gpu-l4": fnv1.ResourceSelector(
                         api_version="modelplane.ai/v1alpha1", kind="InferenceClass", match_name="gpu-l4"
                     ),
+                    "cluster-kubeconfig": fnv1.ResourceSelector(
+                        api_version="v1", kind="Secret", match_name="my-kubeconfig", namespace="modelplane-system"
+                    ),
                 },
+            ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(
+                        resource="cluster-provider-config-kubernetes",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                    fnv1.Dependency(
+                        resource="serving-stack",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                ],
             ),
             conditions=[
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_TRUE, reason="ClusterRunning"),
@@ -4435,6 +4959,7 @@ COMPOSE_CASES = [
         name="NothingOnCluster",
         reason="With only a ModelCache and an InferenceGateway on another cluster, the cluster composes no ClusterUsage and is deletable.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(
@@ -4528,7 +5053,22 @@ COMPOSE_CASES = [
                     "class-gpu-l4": fnv1.ResourceSelector(
                         api_version="modelplane.ai/v1alpha1", kind="InferenceClass", match_name="gpu-l4"
                     ),
+                    "cluster-kubeconfig": fnv1.ResourceSelector(
+                        api_version="v1", kind="Secret", match_name="my-kubeconfig", namespace="modelplane-system"
+                    ),
                 },
+            ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(
+                        resource="cluster-provider-config-kubernetes",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                    fnv1.Dependency(
+                        resource="serving-stack",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                ],
             ),
             conditions=[
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_TRUE, reason="ClusterRunning"),
@@ -4548,6 +5088,7 @@ COMPOSE_CASES = [
         name="ClassUnresolved",
         reason="With its class unresolved and a replica on the cluster, the function composes the guard and the replica's namespace before returning early.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(
@@ -4607,6 +5148,9 @@ COMPOSE_CASES = [
                     "class-gpu-l4": fnv1.ResourceSelector(
                         api_version="modelplane.ai/v1alpha1", kind="InferenceClass", match_name="gpu-l4"
                     ),
+                    "cluster-kubeconfig": fnv1.ResourceSelector(
+                        api_version="v1", kind="Secret", match_name="my-kubeconfig", namespace="modelplane-system"
+                    ),
                 },
             ),
             conditions=[
@@ -4633,6 +5177,7 @@ COMPOSE_CASES = [
         name="MutuallyAuthenticated",
         reason="With an address, this cluster's CA and an InferenceGateway CA all published, the cluster publishes its gateway hostname.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(
@@ -4698,7 +5243,22 @@ COMPOSE_CASES = [
                     ),
                     "model-caches": fnv1.ResourceSelector(api_version="modelplane.ai/v1alpha1", kind="ModelCache"),
                     "gateways": fnv1.ResourceSelector(api_version="modelplane.ai/v1alpha1", kind="InferenceGateway"),
+                    "cluster-kubeconfig": fnv1.ResourceSelector(
+                        api_version="v1", kind="Secret", match_name="my-kubeconfig", namespace="modelplane-system"
+                    ),
                 },
+            ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(
+                        resource="cluster-provider-config-kubernetes",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                    fnv1.Dependency(
+                        resource="serving-stack",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                ],
             ),
             conditions=[
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_TRUE, reason="ClusterRunning"),
@@ -4715,6 +5275,7 @@ COMPOSE_CASES = [
         name="NoGatewayCA",
         reason="With no InferenceGateway CA published, the cluster publishes its address and CA but no hostname.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(
@@ -4764,7 +5325,22 @@ COMPOSE_CASES = [
                     ),
                     "model-caches": fnv1.ResourceSelector(api_version="modelplane.ai/v1alpha1", kind="ModelCache"),
                     "gateways": fnv1.ResourceSelector(api_version="modelplane.ai/v1alpha1", kind="InferenceGateway"),
+                    "cluster-kubeconfig": fnv1.ResourceSelector(
+                        api_version="v1", kind="Secret", match_name="my-kubeconfig", namespace="modelplane-system"
+                    ),
                 },
+            ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(
+                        resource="cluster-provider-config-kubernetes",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                    fnv1.Dependency(
+                        resource="serving-stack",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                ],
             ),
             conditions=[
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_TRUE, reason="ClusterRunning"),
@@ -4779,6 +5355,7 @@ COMPOSE_CASES = [
         name="NoClusterCA",
         reason="Without this cluster's CA, the cluster publishes its address but no hostname.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(
@@ -4834,7 +5411,22 @@ COMPOSE_CASES = [
                     ),
                     "model-caches": fnv1.ResourceSelector(api_version="modelplane.ai/v1alpha1", kind="ModelCache"),
                     "gateways": fnv1.ResourceSelector(api_version="modelplane.ai/v1alpha1", kind="InferenceGateway"),
+                    "cluster-kubeconfig": fnv1.ResourceSelector(
+                        api_version="v1", kind="Secret", match_name="my-kubeconfig", namespace="modelplane-system"
+                    ),
                 },
+            ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(
+                        resource="cluster-provider-config-kubernetes",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                    fnv1.Dependency(
+                        resource="serving-stack",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                ],
             ),
             conditions=[
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_TRUE, reason="ClusterRunning"),
@@ -4848,6 +5440,7 @@ COMPOSE_CASES = [
         name="NoAddress",
         reason="Before its ServingStack publishes an address, the cluster publishes no gateway status, not even its CA.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(
@@ -4903,7 +5496,22 @@ COMPOSE_CASES = [
                     ),
                     "model-caches": fnv1.ResourceSelector(api_version="modelplane.ai/v1alpha1", kind="ModelCache"),
                     "gateways": fnv1.ResourceSelector(api_version="modelplane.ai/v1alpha1", kind="InferenceGateway"),
+                    "cluster-kubeconfig": fnv1.ResourceSelector(
+                        api_version="v1", kind="Secret", match_name="my-kubeconfig", namespace="modelplane-system"
+                    ),
                 },
+            ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(
+                        resource="cluster-provider-config-kubernetes",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                    fnv1.Dependency(
+                        resource="serving-stack",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                ],
             ),
             conditions=[
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_TRUE, reason="ClusterRunning"),
@@ -4919,6 +5527,7 @@ COMPOSE_CASES = [
         name="ManyGatewayCAs",
         reason="The ServingStack accepts the CA of every InferenceGateway that has published one, on any cluster, sorted by name.",
         req=fnv1.RunFunctionRequest(
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_DEPENDENCIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(
@@ -4993,12 +5602,61 @@ COMPOSE_CASES = [
                     ),
                     "model-caches": fnv1.ResourceSelector(api_version="modelplane.ai/v1alpha1", kind="ModelCache"),
                     "gateways": fnv1.ResourceSelector(api_version="modelplane.ai/v1alpha1", kind="InferenceGateway"),
+                    "cluster-kubeconfig": fnv1.ResourceSelector(
+                        api_version="v1", kind="Secret", match_name="my-kubeconfig", namespace="modelplane-system"
+                    ),
                 },
+            ),
+            dependencies=fnv1.Dependencies(
+                items=[
+                    fnv1.Dependency(
+                        resource="cluster-provider-config-kubernetes",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                    fnv1.Dependency(
+                        resource="serving-stack",
+                        required_resource=fnv1.RequiredResourceDependency(requirement_name="cluster-kubeconfig"),
+                    ),
+                ],
             ),
             conditions=[
                 fnv1.Condition(type="ClusterReady", status=fnv1.STATUS_CONDITION_TRUE, reason="ClusterRunning"),
                 fnv1.Condition(type="BackendReady", status=fnv1.STATUS_CONDITION_TRUE, reason="BackendHealthy"),
             ],
+        ),
+    ),
+    # Without dependencies the cluster XR would be composed before its kinds
+    # are activated, and the cluster torn down under a live serving stack, so
+    # the function fails the pipeline rather than composing anything.
+    ComposeCase(
+        name="NoDependencies",
+        reason="When Crossplane doesn't advertise the dependencies capability, the function returns a fatal result and composes nothing.",
+        req=fnv1.RunFunctionRequest(
+            observed=fnv1.State(
+                composite=_inference_cluster(
+                    cluster=v1alpha1.Cluster(source="GKE", gke=v1alpha1.Gke(region="us-central1")),
+                    node_pools=[
+                        v1alpha1.NodePool(
+                            name="l4-pool",
+                            className="gpu-l4",
+                            nodeCount=2,
+                            maxNodeCount=4,
+                            zones=["us-central1-a"],
+                        ),
+                    ],
+                ),
+            ),
+        ),
+        want=fnv1.RunFunctionResponse(
+            meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
+            desired=fnv1.State(),
+            results=[
+                fnv1.Result(
+                    severity=fnv1.SEVERITY_FATAL,
+                    message="Crossplane does not support composed resource dependencies, which this composition requires to order the cluster and its stack",
+                ),
+            ],
+            context=structpb.Struct(),
         ),
     ),
 ]
