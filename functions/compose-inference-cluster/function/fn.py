@@ -312,12 +312,7 @@ class FunctionRunner(grpcv1.FunctionRunnerServiceServicer):
         # without waiting for the cluster to be ready. A Crossplane that
         # ignores dependencies would apply managed resources whose kinds aren't
         # activated yet, and tear the cluster down under a live stack.
-        if not request.has_capability(req, fnv1.CAPABILITY_DEPENDENCIES):
-            response.fatal(
-                rsp,
-                "Crossplane does not support composed resource dependencies, "
-                "which this composition requires to order the cluster and its stack",
-            )
+        if not request.require_capabilities(req, rsp, fnv1.CAPABILITY_DEPENDENCIES):
             return rsp
 
         c = Composer(req, rsp)

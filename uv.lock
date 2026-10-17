@@ -286,7 +286,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1.0" },
-    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=20115c77d5da71f482d99d0f9ebe1115b14780d3" },
+    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=78346f4344af862be7133751cf51c355b7e76852" },
     { name = "crossplane-models", editable = "schemas/python" },
     { name = "grpcio", specifier = ">=1.73.1" },
 ]
@@ -305,7 +305,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1.0" },
-    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=20115c77d5da71f482d99d0f9ebe1115b14780d3" },
+    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=78346f4344af862be7133751cf51c355b7e76852" },
     { name = "crossplane-models", editable = "schemas/python" },
     { name = "grpcio", specifier = ">=1.73.1" },
 ]
@@ -324,7 +324,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1.0" },
-    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=20115c77d5da71f482d99d0f9ebe1115b14780d3" },
+    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=78346f4344af862be7133751cf51c355b7e76852" },
     { name = "crossplane-models", editable = "schemas/python" },
     { name = "grpcio", specifier = ">=1.73.1" },
 ]
@@ -343,7 +343,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1.0" },
-    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=20115c77d5da71f482d99d0f9ebe1115b14780d3" },
+    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=78346f4344af862be7133751cf51c355b7e76852" },
     { name = "crossplane-models", editable = "schemas/python" },
     { name = "grpcio", specifier = ">=1.73.1" },
 ]
@@ -362,7 +362,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1.0" },
-    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=20115c77d5da71f482d99d0f9ebe1115b14780d3" },
+    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=78346f4344af862be7133751cf51c355b7e76852" },
     { name = "crossplane-models", editable = "schemas/python" },
     { name = "grpcio", specifier = ">=1.73.1" },
 ]
@@ -381,7 +381,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1.0" },
-    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=20115c77d5da71f482d99d0f9ebe1115b14780d3" },
+    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=78346f4344af862be7133751cf51c355b7e76852" },
     { name = "crossplane-models", editable = "schemas/python" },
     { name = "grpcio", specifier = ">=1.73.1" },
 ]
@@ -400,7 +400,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1.0" },
-    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=20115c77d5da71f482d99d0f9ebe1115b14780d3" },
+    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=78346f4344af862be7133751cf51c355b7e76852" },
     { name = "crossplane-models", editable = "schemas/python" },
     { name = "grpcio", specifier = ">=1.73.1" },
 ]
@@ -419,7 +419,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1.0" },
-    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=20115c77d5da71f482d99d0f9ebe1115b14780d3" },
+    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=78346f4344af862be7133751cf51c355b7e76852" },
     { name = "crossplane-models", editable = "schemas/python" },
     { name = "grpcio", specifier = ">=1.73.1" },
 ]
@@ -438,7 +438,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1.0" },
-    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=20115c77d5da71f482d99d0f9ebe1115b14780d3" },
+    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=78346f4344af862be7133751cf51c355b7e76852" },
     { name = "crossplane-models", editable = "schemas/python" },
     { name = "grpcio", specifier = ">=1.73.1" },
 ]
@@ -459,7 +459,7 @@ dependencies = [
 requires-dist = [
     { name = "cel-python", specifier = ">=0.3.0" },
     { name = "click", specifier = ">=8.1.0" },
-    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=20115c77d5da71f482d99d0f9ebe1115b14780d3" },
+    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=78346f4344af862be7133751cf51c355b7e76852" },
     { name = "crossplane-models", editable = "schemas/python" },
     { name = "grpcio", specifier = ">=1.73.1" },
 ]
@@ -478,7 +478,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1.0" },
-    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=20115c77d5da71f482d99d0f9ebe1115b14780d3" },
+    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=78346f4344af862be7133751cf51c355b7e76852" },
     { name = "crossplane-models", editable = "schemas/python" },
     { name = "grpcio", specifier = ">=1.73.1" },
 ]
@@ -497,7 +497,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1.0" },
-    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=20115c77d5da71f482d99d0f9ebe1115b14780d3" },
+    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=78346f4344af862be7133751cf51c355b7e76852" },
     { name = "crossplane-models", editable = "schemas/python" },
     { name = "grpcio", specifier = ">=1.73.1" },
 ]
@@ -516,7 +516,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1.0" },
-    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=20115c77d5da71f482d99d0f9ebe1115b14780d3" },
+    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=78346f4344af862be7133751cf51c355b7e76852" },
     { name = "crossplane-models", editable = "schemas/python" },
     { name = "grpcio", specifier = ">=1.73.1" },
 ]
@@ -535,7 +535,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1.0" },
-    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=20115c77d5da71f482d99d0f9ebe1115b14780d3" },
+    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=78346f4344af862be7133751cf51c355b7e76852" },
     { name = "crossplane-models", editable = "schemas/python" },
     { name = "grpcio", specifier = ">=1.73.1" },
 ]
@@ -554,7 +554,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1.0" },
-    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=20115c77d5da71f482d99d0f9ebe1115b14780d3" },
+    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=78346f4344af862be7133751cf51c355b7e76852" },
     { name = "crossplane-models", editable = "schemas/python" },
     { name = "grpcio", specifier = ">=1.73.1" },
 ]
@@ -574,7 +574,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1.0" },
-    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=20115c77d5da71f482d99d0f9ebe1115b14780d3" },
+    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=78346f4344af862be7133751cf51c355b7e76852" },
     { name = "crossplane-models", editable = "schemas/python" },
     { name = "grpcio", specifier = ">=1.73.1" },
     { name = "pyyaml", specifier = ">=6.0" },
@@ -594,7 +594,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1.0" },
-    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=20115c77d5da71f482d99d0f9ebe1115b14780d3" },
+    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=78346f4344af862be7133751cf51c355b7e76852" },
     { name = "crossplane-models", editable = "schemas/python" },
     { name = "grpcio", specifier = ">=1.73.1" },
 ]
@@ -613,7 +613,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1.0" },
-    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=20115c77d5da71f482d99d0f9ebe1115b14780d3" },
+    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=78346f4344af862be7133751cf51c355b7e76852" },
     { name = "crossplane-models", editable = "schemas/python" },
     { name = "grpcio", specifier = ">=1.73.1" },
 ]
@@ -621,7 +621,7 @@ requires-dist = [
 [[package]]
 name = "crossplane-function-sdk-python"
 version = "0.0.0"
-source = { git = "https://github.com/stevendborrelli/function-sdk-python?rev=20115c77d5da71f482d99d0f9ebe1115b14780d3#20115c77d5da71f482d99d0f9ebe1115b14780d3" }
+source = { git = "https://github.com/stevendborrelli/function-sdk-python?rev=78346f4344af862be7133751cf51c355b7e76852#78346f4344af862be7133751cf51c355b7e76852" }
 dependencies = [
     { name = "click" },
     { name = "grpcio" },
@@ -889,7 +889,7 @@ dev = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=20115c77d5da71f482d99d0f9ebe1115b14780d3" },
+    { name = "crossplane-function-sdk-python", git = "https://github.com/stevendborrelli/function-sdk-python?rev=78346f4344af862be7133751cf51c355b7e76852" },
     { name = "kubernetes", specifier = ">=36.0" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pytest", specifier = ">=9.0" },

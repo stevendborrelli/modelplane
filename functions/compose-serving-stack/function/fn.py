@@ -276,12 +276,7 @@ class FunctionRunner(grpcv1.FunctionRunnerServiceServicer):
         # it down in no particular order. Fail the pipeline instead - a
         # composition that doesn't reconcile is easier to diagnose than a stack
         # that half installs and won't delete.
-        if not request.has_capability(req, fnv1.CAPABILITY_DEPENDENCIES):
-            response.fatal(
-                rsp,
-                "Crossplane does not support composed resource dependencies, "
-                "which this composition requires to order the stack",
-            )
+        if not request.require_capabilities(req, rsp, fnv1.CAPABILITY_DEPENDENCIES):
             return rsp
 
         c = Composer(req, rsp)

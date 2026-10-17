@@ -2467,8 +2467,8 @@ COMPOSE_CASES = [
                 fnv1.Result(
                     severity=fnv1.SEVERITY_FATAL,
                     message=(
-                        "Crossplane does not support composed resource dependencies, "
-                        "which this composition requires to order the stack"
+                        "This function requires Crossplane capabilities that Crossplane "
+                        "doesn't advertise: CAPABILITY_DEPENDENCIES."
                     ),
                 )
             ],

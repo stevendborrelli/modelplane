@@ -5632,6 +5632,9 @@ COMPOSE_CASES = [
         name="NoDependencies",
         reason="When Crossplane doesn't advertise the dependencies capability, the function returns a fatal result and composes nothing.",
         req=fnv1.RunFunctionRequest(
+            # A Crossplane that advertises its capabilities, but not this one:
+            # ordering is disabled.
+            meta=fnv1.RequestMeta(capabilities=[fnv1.CAPABILITY_CAPABILITIES]),
             observed=fnv1.State(
                 composite=_inference_cluster(
                     cluster=v1alpha1.Cluster(source="GKE", gke=v1alpha1.Gke(region="us-central1")),
@@ -5653,7 +5656,7 @@ COMPOSE_CASES = [
             results=[
                 fnv1.Result(
                     severity=fnv1.SEVERITY_FATAL,
-                    message="Crossplane does not support composed resource dependencies, which this composition requires to order the cluster and its stack",
+                    message="This function requires Crossplane capabilities that Crossplane doesn't advertise: CAPABILITY_DEPENDENCIES.",
                 ),
             ],
             context=structpb.Struct(),
