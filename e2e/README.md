@@ -112,6 +112,7 @@ against. The control-plane cluster needs no DRA.
 nix run .#e2e              # bring up both clusters + deploy the mock model
 nix run .#e2e -- --verify  # same, then run the tests
 nix run .#e2e -- --test    # run the tests against clusters already up
+nix run .#e2e -- --teardown  # delete what's up the way a user would, and check the order
 nix run .#e2e -- --clean   # tear both clusters down
 ```
 
@@ -151,6 +152,25 @@ image and the arguments only; a local build that also changes CRDs needs its
 The composition functions are a separate matter: they're built from `uv.lock`,
 so the SDK they carry is whatever the lockfile resolves. See the
 `[tool.uv.sources]` note in the root `pyproject.toml`.
+
+### Checking teardown
+
+`nix run .#e2e -- --teardown` deletes what `--verify` left up the way a user
+would, with a plain `kubectl delete` and so background propagation: the
+`ModelService` and `ModelDeployment`, then the `InferenceGateway`, then the
+`InferenceCluster`. It watches every object each one composed, nested XRs
+included, and fails if an XR disappears before what it composed, if a resource
+starts deleting while a resource that depends on it (by the `dependsOn` its
+composed resource reference records) still exists, or if anything is left
+behind. That's issue #477: an XR that goes too early releases whatever was
+waiting on it while its Helm releases and Objects are still finalizing.
+
+```bash
+nix run .#e2e -- --verify && nix run .#e2e -- --teardown
+```
+
+It's a separate mode rather than a test in `tests/` because it deletes the
+platform the tests share, which `--test` expects to find still up.
 
 `crossplane project run` installs the config and applies the resources, then
 returns; the serving-stack install and model rollout reconcile in the background.
@@ -214,6 +234,7 @@ client, while bring-up drives the kind, crossplane, docker and kubectl CLIs.
 ```
 e2e/
   environment.py             # two-cluster bring-up and teardown
+  teardown.py                # delete the platform, and check the order it goes in
   kube.py, gateway.py        # Kubernetes API and curl helpers
   wait.py                    # polling until a condition holds
   tests/

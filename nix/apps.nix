@@ -380,7 +380,9 @@
   # With no argument it brings the environment up and applies the manifests,
   # --no-apply stops short of the manifests, --verify then runs the tests in
   # e2e/tests/ (passing any further arguments to pytest), --test runs them
-  # against an environment that's already up, and --clean tears it all down.
+  # against an environment that's already up, --teardown deletes what's up
+  # the way a user would and checks the order it goes in (e2e/teardown.py),
+  # and --clean tears it all down.
   # This app materialises the Nix-built function images (as `run` does) for
   # crossplane project run to load.
   e2e =
@@ -436,10 +438,14 @@
                 exec python -m pytest e2e/tests \
                   -o log_cli=true --log-cli-level=INFO "$@"
                 ;;
+              --teardown)
+                shift
+                exec python -m e2e.teardown "$@"
+                ;;
               *)
                 echo "usage: nix run .#e2e -- [--no-apply |" \
                   "--verify [pytest args...] | --test [pytest args...] |" \
-                  "--clean]" >&2
+                  "--teardown [--timeout SECONDS] | --clean]" >&2
                 exit 2
                 ;;
             esac
