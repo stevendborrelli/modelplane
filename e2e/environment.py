@@ -37,6 +37,8 @@ import shlex
 import subprocess
 import tempfile
 
+from e2e import wait
+
 log = logging.getLogger(__name__)
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -244,6 +246,18 @@ def up_control_plane() -> None:
             "patch", f"provider.pkg.crossplane.io/{provider}", "--type=merge", f"--patch={json.dumps(patch)}",
         )  # fmt: skip
 
+    # Re-pointing a provider at a runtime config makes a new ProviderRevision,
+    # whose Deployment replaces the old one's. Wait for that before anything
+    # Modelplane-shaped exists. A provider pod replaced mid-reconcile can leave
+    # work half done: provider-helm killed during `helm install --wait` leaves
+    # the release pending-install, and every later attempt fails with "another
+    # operation is in progress" - which wedges everything that depends on it.
+    for provider, runtime_config in (
+        ("upbound-provider-helm", "provider-helm-modelplane"),
+        ("upbound-provider-kubernetes", "provider-kubernetes-modelplane"),
+    ):
+        wait_for_runtime_config(provider, runtime_config)
+
     # InferenceCluster local reads this kubeconfig to reach the workload
     # cluster. --internal gives the address on the kind network, which the
     # control plane's provider pods can reach and 127.0.0.1 isn't.
@@ -256,6 +270,35 @@ def up_control_plane() -> None:
         "stringData": {"kubeconfig": output("kind", "get", "kubeconfig", "--internal", f"--name={WORKLOAD}")},
     }
     kubectl(CONTROL_PLANE_CONTEXT, "apply", "--filename=-", stdin=json.dumps(secret))
+
+
+def wait_for_runtime_config(provider: str, runtime_config: str) -> None:
+    """Wait for a provider to be running only its revision that uses runtime_config."""
+
+    def current_revision() -> str:
+        revision = output(
+            "kubectl", f"--context={CONTROL_PLANE_CONTEXT}",
+            "get", f"provider.pkg.crossplane.io/{provider}", "--output=jsonpath={.status.currentRevision}",
+        )  # fmt: skip
+        assert revision, f"{provider} has no current revision yet"
+        got = output(
+            "kubectl", f"--context={CONTROL_PLANE_CONTEXT}",
+            "get", f"providerrevision.pkg.crossplane.io/{revision}", "--output=jsonpath={.spec.runtimeConfigRef.name}",
+        )  # fmt: skip
+        assert got == runtime_config, f"{provider}'s current revision {revision} uses runtime config {got!r}"
+        return revision
+
+    revision = wait.until(current_revision, timeout=300, what=f"{provider} to use {runtime_config}", interval=2)
+    kubectl(
+        CONTROL_PLANE_CONTEXT,
+        "wait", f"providerrevision.pkg.crossplane.io/{revision}", "--for=condition=RuntimeHealthy", "--timeout=5m",
+    )  # fmt: skip
+    # The old revision's pod is the one that may still be acting.
+    kubectl(
+        CONTROL_PLANE_CONTEXT,
+        "wait", "pod", f"--namespace={CROSSPLANE_NAMESPACE}", "--for=delete", "--timeout=5m",
+        f"--selector=pkg.crossplane.io/provider={provider},pkg.crossplane.io/revision!={revision}",
+    )  # fmt: skip
 
 
 def use_local_crossplane(*, image: str, args: list[str]) -> None:
