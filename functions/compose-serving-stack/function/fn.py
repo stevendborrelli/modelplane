@@ -24,14 +24,15 @@ decisions of its own: every version, values block, and membership
 decision was resolved where a human reviewed a diff.
 
 Ordering derives from the data too, in both directions. A component's
-depends_on edges become Usage resources holding a dependency until its
-dependents are gone, and they gate installs: a component is first
-created only once every dependency reports Ready, so bring-up proceeds
-in dependency waves instead of relying on Helm retrying into absent
-prerequisites. The hand-rendered pieces are the ones that read
-spec.gateway, which is per-cluster configuration rather than stack data:
-the gateway pair, its PKI, and the Usages sequencing the pair's teardown
-ahead of the Envoy Gateway release.
+depends_on edges become dependencies the function declares on its
+response: Crossplane creates a component only once every dependency
+reports Ready, so bring-up proceeds in dependency waves instead of
+relying on Helm retrying into absent prerequisites, and tears it down
+in reverse, holding a dependency until its dependents are gone. The
+hand-rendered pieces are the ones that read spec.gateway, which is
+per-cluster configuration rather than stack data: the gateway pair, its
+PKI, and the edges sequencing the pair against the Envoy Gateway
+release.
 """
 
 from typing import Any, TypeVar
@@ -50,18 +51,12 @@ from models.io.crossplane.m.kubernetes.object import v1alpha1 as k8sobjv1alpha1
 from models.io.crossplane.m.kubernetes.providerconfig import (
     v1alpha1 as k8spcv1alpha1,
 )
-from models.io.crossplane.protection.usage import v1beta1 as usagev1beta1
 from models.io.k8s.apimachinery.pkg.apis.meta import v1 as metav1
 
 from function import collector, gateway, stacks
 
 # The Pydantic model one required resource is parsed into.
 _T = TypeVar("_T", bound=pydantic.BaseModel)
-
-# Label key every rendered Release and Object carries, valued with its
-# composed-resource key, so Usage resourceSelectors can name any
-# component (or one doc of a bundle) mechanically.
-_LABEL_RESOURCE = "modelplane.ai/resource"
 
 # Annotation provider-helm reads as the Helm release name. The stack
 # lists carry the release name per Chart entry (mp-<chart>): stable
@@ -91,10 +86,10 @@ _SECRET_TYPE_KUBECONFIG = "Kubeconfig"
 _CERT_MANAGER_KEY = "cert-manager"
 _CLUSTER_RESOURCE_NAMESPACE = "modelplane-system"
 
-# The (apiVersion, kind) a component's composed resources render as,
-# used by the derived Usages' of/by references.
-_RELEASE_REF = ("helm.m.crossplane.io/v1beta1", "Release")
-_OBJECT_REF = ("kubernetes.m.crossplane.io/v1alpha1", "Object")
+# Composed-resource keys of the two ProviderConfigs. Everything
+# targeting the remote cluster depends on the one its kind reads.
+_PC_KUBERNETES = "provider-config-kubernetes"
+_PC_HELM = "provider-config-helm"
 
 # The cluster gateway's own PKI, issued by cert-manager, which the stack
 # already installs. Composition functions are called repeatedly and must be a
@@ -163,10 +158,7 @@ def _namespace(meta: metav1.ObjectMeta | None) -> str:
 def _helm_release(chart: stacks.Chart, provider_config: str) -> helmv1beta1.Release:
     """Build a Helm Release for a Chart entry, targeting the remote cluster."""
     release = helmv1beta1.Release(
-        metadata=metav1.ObjectMeta(
-            annotations={_EXTERNAL_NAME_ANNOTATION: chart.release},
-            labels={_LABEL_RESOURCE: chart.key},
-        ),
+        metadata=metav1.ObjectMeta(annotations={_EXTERNAL_NAME_ANNOTATION: chart.release}),
         spec=helmv1beta1.Spec(
             providerConfigRef=helmv1beta1.ProviderConfigRef(
                 kind="ProviderConfig",
@@ -201,7 +193,6 @@ def _helm_release(chart: stacks.Chart, provider_config: str) -> helmv1beta1.Rele
 def _k8s_object(
     provider_config: str,
     manifest: dict,
-    metadata: metav1.ObjectMeta | None = None,
     *,
     ready_when: str | None = None,
     management_policies: list | None = None,
@@ -216,10 +207,6 @@ def _k8s_object(
     re-observing on its fast poll until the query passes.
     """
     obj = k8sobjv1alpha1.Object(
-        # Only set metadata when present. Under exclude_unset serialization,
-        # passing metadata=None would emit a null metadata into the composed
-        # resource rather than omitting it.
-        **({"metadata": metadata} if metadata is not None else {}),
         spec=k8sobjv1alpha1.Spec(
             providerConfigRef=k8sobjv1alpha1.ProviderConfigRef(
                 kind="ProviderConfig",
@@ -238,36 +225,6 @@ def _k8s_object(
             celQuery=ready_when,
         )
     return obj
-
-
-def _usage(
-    of_ref: tuple[str, str],
-    of_key: str,
-    by_ref: tuple[str, str],
-    by_key: str,
-) -> usagev1beta1.Usage:
-    """Build a Usage holding `of` (a dependency) until `by` is gone."""
-    return usagev1beta1.Usage(
-        spec=usagev1beta1.Spec(
-            of=usagev1beta1.Of(
-                apiVersion=of_ref[0],
-                kind=of_ref[1],
-                resourceSelector=usagev1beta1.ResourceSelectorModel(
-                    matchControllerRef=True,
-                    matchLabels={_LABEL_RESOURCE: of_key},
-                ),
-            ),
-            by=usagev1beta1.By(
-                apiVersion=by_ref[0],
-                kind=by_ref[1],
-                resourceSelector=usagev1beta1.ResourceSelector(
-                    matchControllerRef=True,
-                    matchLabels={_LABEL_RESOURCE: by_key},
-                ),
-            ),
-            replayDeletion=True,
-        ),
-    )
 
 
 def _ensure_trailing_newline(cert: str) -> str:
@@ -311,6 +268,22 @@ class FunctionRunner(grpcv1.FunctionRunnerServiceServicer):
         log.info("Running function")
 
         rsp = response.to(req)
+
+        # This composition declares its ordering rather than enacting it: it
+        # composes every resource on every pass and lets Crossplane sequence
+        # them. A Crossplane that ignores dependencies would create the whole
+        # stack at once, into ProviderConfigs that may not exist yet, and tear
+        # it down in no particular order. Fail the pipeline instead - a
+        # composition that doesn't reconcile is easier to diagnose than a stack
+        # that half installs and won't delete.
+        if not request.has_capability(req, fnv1.CAPABILITY_DEPENDENCIES):
+            response.fatal(
+                rsp,
+                "Crossplane does not support composed resource dependencies, "
+                "which this composition requires to order the stack",
+            )
+            return rsp
+
         c = Composer(req, rsp)
         c.compose()
         return rsp
@@ -344,9 +317,8 @@ class Composer:
         rendered = self.compose_components(components)
         rendered += self.compose_gateway()
         rendered += self.compose_gateway_pki()
-        self.compose_collector()
-        self.compose_component_usages(components)
-        self.compose_gateway_usages()
+        collected = self.compose_collector()
+        self.compose_dependencies(components, rendered + collected)
         self.write_status()
         self.mark_readiness(rendered)
 
@@ -413,7 +385,7 @@ class Composer:
             )
 
         resource.update(
-            self.rsp.desired.resources["provider-config-kubernetes"],
+            self.rsp.desired.resources[_PC_KUBERNETES],
             k8spcv1alpha1.ProviderConfig(
                 metadata=metav1.ObjectMeta(name=_pc_name(self.xr)),
                 spec=k8s_pc_spec,
@@ -421,7 +393,7 @@ class Composer:
         )
 
         resource.update(
-            self.rsp.desired.resources["provider-config-helm"],
+            self.rsp.desired.resources[_PC_HELM],
             helmpcv1beta1.ProviderConfig(
                 metadata=metav1.ObjectMeta(name=_pc_name(self.xr)),
                 spec=helm_pc_spec,
@@ -433,87 +405,77 @@ class Composer:
 
         A Chart renders as one provider-helm Release under the entry's
         key; a Manifests entry as one provider-kubernetes Object per
-        doc, keyed by stacks.components.doc_keys. Everything carries the
-        _LABEL_RESOURCE label the derived Usages select on, and
-        everything is gated on the ProviderConfigs being observed (see
-        provider_configs_observed) so first creation doesn't race them.
+        doc, keyed by stacks.components.doc_keys.
 
-        depends_on gates first creation too: a component is created
-        only once every doc of every dependency reports Ready, so
-        bring-up proceeds in dependency waves (cert-manager before the
-        GPU Operator, the GPU Operator before the DRA driver). Once a
-        resource exists it always re-composes - the observed check - so
-        a dependency going unready later never deletes dependents. A
-        Release reports Ready when Helm deploys it, not when its
-        workloads run, so this is deploy-order, not health-order.
+        Every component is composed on every pass. Nothing is gated
+        here: compose_dependencies declares what waits for what, and
+        Crossplane creates each resource once the resources it depends
+        on report Ready, so bring-up proceeds in dependency waves
+        (cert-manager before the GPU Operator, the GPU Operator before
+        the DRA driver). A Release reports Ready when Helm deploys it,
+        not when its workloads run, unless the entry sets wait, so those
+        waves are deploy-order, not health-order.
 
         Returns the composed-resource keys it rendered, for readiness.
         """
-        pc_observed = self.provider_configs_observed()
         pc = _pc_name(self.xr)
-        docs = {c.key: stacks.components.doc_keys(c) for c in components}
-
-        def deps_ready(c: stacks.Component) -> bool:
-            return all(
-                resource.get_condition(self.req.observed.resources.get(key), "Ready").status == "True"
-                for dep in c.depends_on
-                for key in docs[dep]
-            )
-
         rendered: list[str] = []
         for c in components:
-            gate = pc_observed and deps_ready(c)
             if isinstance(c, stacks.Chart):
-                if not (gate or c.key in self.req.observed.resources):
-                    continue
                 resource.update(self.rsp.desired.resources[c.key], _helm_release(c, pc))
                 rendered.append(c.key)
                 continue
             for key, doc in zip(stacks.components.doc_keys(c), c.manifests, strict=True):
-                if not (gate or key in self.req.observed.resources):
-                    continue
                 resource.update(
                     self.rsp.desired.resources[key],
-                    _k8s_object(
-                        pc,
-                        doc,
-                        metadata=metav1.ObjectMeta(labels={_LABEL_RESOURCE: key}),
-                        ready_when=c.ready,
-                    ),
+                    _k8s_object(pc, doc, ready_when=c.ready),
                 )
                 rendered.append(key)
         return rendered
 
-    def compose_component_usages(self, components: list[stacks.Component]) -> None:
-        """Derive teardown-ordering Usages from the components' edges.
+    def compose_dependencies(self, components: list[stacks.Component], composed: list[str]) -> None:
+        """Declare the order Crossplane creates and deletes everything in.
 
-        Crossplane applies composed resources concurrently, so without a
-        Usage nothing sequences deletion. Each depends_on edge becomes
-        one Usage per (dependency doc, dependent doc) pair, holding the
-        dependency until the dependent is gone: the kai-scheduler
+        Crossplane applies composed resources concurrently unless a
+        function says otherwise. Every edge declared here constrains
+        both directions at once: a resource is created only once what it
+        depends on reports Ready, and what it depends on is deleted only
+        once the resource is gone.
+
+        Three kinds of edge. Every Release and Object depends on the
+        ProviderConfig it targets, which keeps first creation from
+        racing a ProviderConfig Crossplane hasn't persisted yet, and
+        holds that ProviderConfig through teardown until nothing points
+        at it any more. Each component depends_on edge becomes one edge
+        per (dependency doc, dependent doc) pair: the kai-scheduler
         release outlives the Queue CRs whose CRD it owns, cert-manager
-        outlives the Envoy Gateway release whose webhooks need it, and
-        so on. Usages reference nothing on the remote cluster, so they
-        compose ungated and are ready on arrival.
-        """
-        refs: dict[str, tuple[str, str]] = {}
-        docs: dict[str, list[str]] = {}
-        for c in components:
-            keys = stacks.components.doc_keys(c)
-            docs[c.key] = keys
-            for key in keys:
-                refs[key] = _RELEASE_REF if isinstance(c, stacks.Chart) else _OBJECT_REF
+        outlives the Envoy Gateway release whose webhooks need it. And
+        the gateway pair, which isn't stack data, is sequenced by hand
+        against the controller that owns its finalizers.
 
+        composed is every key this function rendered onto the remote
+        cluster.
+        """
+        releases = {c.key for c in components if isinstance(c, stacks.Chart)}
+        for key in composed:
+            response.add_dependency(self.rsp, key, _PC_HELM if key in releases else _PC_KUBERNETES)
+
+        docs = {c.key: stacks.components.doc_keys(c) for c in components}
         for c in components:
             for dep in c.depends_on:
-                for of_key in docs[dep]:
-                    for by_key in docs[c.key]:
-                        key = f"usage-{of_key}-by-{by_key}"
-                        resource.update(
-                            self.rsp.desired.resources[key],
-                            _usage(refs[of_key], of_key, refs[by_key], by_key),
-                        )
-                        self.rsp.desired.resources[key].ready = fnv1.READY_TRUE
+                for dependency_key in docs[dep]:
+                    for key in docs[c.key]:
+                        response.add_dependency(self.rsp, key, dependency_key)
+
+        # The Envoy Gateway controller must outlive the Gateway and
+        # GatewayClass it manages: they carry finalizers it has to process
+        # on delete. In the other direction the GatewayClass needs the CRD
+        # that release installs before it can be applied. The Gateway edge
+        # is declared only while there is a Gateway: compose_gateway
+        # withholds it until the cluster has an InferenceGateway CA to trust.
+        if "gateway" in self.rsp.desired.resources:
+            response.add_dependency(self.rsp, "gateway", "gateway-class")
+        response.add_dependency(self.rsp, "gateway-class", "envoy-gateway")
 
     def serves_gateway(self) -> bool:
         """Whether this cluster's gateway should be serving.
@@ -529,7 +491,8 @@ class Composer:
 
         The one hand-rendered pair, from function/gateway.py: both read
         spec.gateway, which is per-cluster configuration rather than stack
-        data. Gated on ProviderConfigs like every component.
+        data. Ordered against the ProviderConfig and the Envoy Gateway
+        release by compose_dependencies, like every component.
 
         The Gateway is served only once the cluster has an InferenceGateway CA
         to demand a client certificate against; until then it composes the
@@ -540,7 +503,6 @@ class Composer:
 
         Returns the composed-resource keys it rendered, for readiness.
         """
-        pc_observed = self.provider_configs_observed()
         pc = _pc_name(self.xr)
         gw = self.xr.spec.gateway
         serve_gateway = self.serves_gateway()
@@ -558,16 +520,9 @@ class Composer:
         for key, manifest, cel in gateway.objects(self.xr.spec.gateway):
             if key == "gateway" and not serve_gateway:
                 continue
-            if not (pc_observed or key in self.req.observed.resources):
-                continue
             resource.update(
                 self.rsp.desired.resources[key],
-                _k8s_object(
-                    pc,
-                    manifest,
-                    metadata=metav1.ObjectMeta(labels={_LABEL_RESOURCE: key}),
-                    ready_when=cel,
-                ),
+                _k8s_object(pc, manifest, ready_when=cel),
             )
             rendered.append(key)
         return rendered
@@ -588,7 +543,6 @@ class Composer:
 
         Returns the composed-resource keys it rendered, for readiness.
         """
-        pc_observed = self.provider_configs_observed()
         pc = _pc_name(self.xr)
         gw = self.xr.spec.gateway
 
@@ -651,8 +605,6 @@ class Composer:
             ),
         ]
         for key, manifest in certs:
-            if not (pc_observed or key in self.req.observed.resources):
-                continue
             cel = _CERTIFICATE_READY_CEL if manifest["kind"] == "Certificate" else None
             resource.update(self.rsp.desired.resources[key], _k8s_object(pc, manifest, ready_when=cel))
             rendered.append(key)
@@ -669,56 +621,50 @@ class Composer:
         # so the key is read once, in-cluster, by a controller already entitled to
         # it. trust-manager also rejects any PEM block that isn't a CERTIFICATE,
         # so it can't be made to republish a key by naming the wrong source key.
-        if pc_observed or "gateway-ca-bundle" in self.req.observed.resources:
-            resource.update(
-                self.rsp.desired.resources["gateway-ca-bundle"],
-                _k8s_object(
-                    pc,
-                    {
-                        "apiVersion": "trust.cert-manager.io/v1alpha1",
-                        "kind": "Bundle",
-                        # Cluster-scoped, and it names the ConfigMap it syncs.
-                        "metadata": {"name": _CA_BUNDLE},
-                        "spec": {
-                            "sources": [{"secret": {"name": _CA_SECRET, "key": "ca.crt"}}],
-                            "target": {
-                                "configMap": {"key": "ca.crt"},
-                                # A target syncs to every namespace by default.
-                                # Only modelplane-system reads it.
-                                "namespaceSelector": {
-                                    "matchLabels": {"kubernetes.io/metadata.name": "modelplane-system"}
-                                },
-                            },
+        resource.update(
+            self.rsp.desired.resources["gateway-ca-bundle"],
+            _k8s_object(
+                pc,
+                {
+                    "apiVersion": "trust.cert-manager.io/v1alpha1",
+                    "kind": "Bundle",
+                    # Cluster-scoped, and it names the ConfigMap it syncs.
+                    "metadata": {"name": _CA_BUNDLE},
+                    "spec": {
+                        "sources": [{"secret": {"name": _CA_SECRET, "key": "ca.crt"}}],
+                        "target": {
+                            "configMap": {"key": "ca.crt"},
+                            # A target syncs to every namespace by default.
+                            # Only modelplane-system reads it.
+                            "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "modelplane-system"}},
                         },
                     },
-                    ready_when=_BUNDLE_SYNCED_CEL,
-                ),
-            )
-            rendered.append("gateway-ca-bundle")
+                },
+                ready_when=_BUNDLE_SYNCED_CEL,
+            ),
+        )
+        rendered.append("gateway-ca-bundle")
 
         # Observed, not managed: trust-manager owns this ConfigMap, and this only
         # needs to read the certificate back out so status can publish it.
-        if pc_observed or "gateway-ca-configmap" in self.req.observed.resources:
-            resource.update(
-                self.rsp.desired.resources["gateway-ca-configmap"],
-                _k8s_object(
-                    pc,
-                    {
-                        "apiVersion": "v1",
-                        "kind": "ConfigMap",
-                        "metadata": {"name": _CA_BUNDLE, "namespace": "modelplane-system"},
-                    },
-                    management_policies=["Observe"],
-                ),
-            )
-            rendered.append("gateway-ca-configmap")
+        resource.update(
+            self.rsp.desired.resources["gateway-ca-configmap"],
+            _k8s_object(
+                pc,
+                {
+                    "apiVersion": "v1",
+                    "kind": "ConfigMap",
+                    "metadata": {"name": _CA_BUNDLE, "namespace": "modelplane-system"},
+                },
+                management_policies=["Observe"],
+            ),
+        )
+        rendered.append("gateway-ca-configmap")
 
         # With nothing to trust there is no Gateway either (see
         # serves_gateway), so there is nothing to attach a policy to.
         client_cas = gw.clientCAs
         if not client_cas:
-            return rendered
-        if not (pc_observed or "gateway-client-ca-bundle" in self.req.observed.resources):
             return rendered
         # One ConfigMap holding every InferenceGateway's CA, concatenated, which
         # is what a PEM trust bundle is.
@@ -769,7 +715,7 @@ class Composer:
         rendered.append("gateway-client-auth")
         return rendered
 
-    def compose_collector(self) -> None:
+    def compose_collector(self) -> list[str]:
         """Compose the collector that gathers this cluster's telemetry.
 
         Nothing until a TelemetryDestination exists. Neither collector stores
@@ -785,6 +731,9 @@ class Composer:
         fleet not Ready and stop the scheduler placing anything, anywhere. A
         collector that cannot start reports it on its own objects and on the
         TelemetryDestination, which is where that failure belongs.
+
+        Returns the composed-resource keys it rendered, so they're ordered
+        against the ProviderConfig like everything else.
         """
         response.require_resources(
             self.rsp,
@@ -799,7 +748,7 @@ class Composer:
             kind="MetricMapping",
         )
         if "destinations" not in self.req.required_resources or "mappings" not in self.req.required_resources:
-            return
+            return []
 
         # Sorted, not whichever the API server listed first: the collector
         # restarts on a change to its rendered config, so an unstable order
@@ -809,7 +758,7 @@ class Composer:
             key=lambda d: _name(d.metadata),
         )
         if not destinations:
-            return
+            return []
         sinks, extensions = self.merge_destinations(destinations)
 
         # The collector mounts each sink's credential as a Secret in its own
@@ -832,7 +781,7 @@ class Composer:
                 namespace=_CLUSTER_RESOURCE_NAMESPACE,
             )
             if key not in self.req.required_resources:
-                return
+                return []
             found = request.get_required_resource(self.req, key)
             # Resolved and absent is not a reason to withhold the collector.
             # The TelemetryDestination reports a Secret that isn't there, and
@@ -846,30 +795,22 @@ class Composer:
         mappings = list(stacks.BUILTIN_MAPPINGS)
         mappings += self._parse("MetricMapping", mmv1alpha1.MetricMapping, "mappings")
 
-        pc_observed = self.provider_configs_observed()
         pc = _pc_name(self.xr)
+        composed: list[str] = []
         for key, manifest, cel in collector.objects(
             cluster=_cluster_name(self.xr),
             mappings=mappings,
             sinks=sinks,
             extensions=extensions,
         ):
-            if not (pc_observed or key in self.req.observed.resources):
-                continue
             resource.update(
                 self.rsp.desired.resources[key],
-                _k8s_object(
-                    pc,
-                    manifest,
-                    metadata=metav1.ObjectMeta(labels={_LABEL_RESOURCE: key}),
-                    ready_when=cel,
-                ),
+                _k8s_object(pc, manifest, ready_when=cel),
             )
             self.rsp.desired.resources[key].ready = fnv1.READY_TRUE
+            composed.append(key)
 
         for key, (secret_name, data) in secrets.items():
-            if not (pc_observed or key in self.req.observed.resources):
-                continue
             # Same name, same namespace, other cluster, so the Deployment's
             # mount needs nothing rewritten. The base64 `data` is copied
             # verbatim: decoding and re-encoding would corrupt a credential
@@ -884,10 +825,11 @@ class Composer:
                         "metadata": {"name": secret_name, "namespace": collector.NAMESPACE},
                         "data": data,
                     },
-                    metadata=metav1.ObjectMeta(labels={_LABEL_RESOURCE: key}),
                 ),
             )
             self.rsp.desired.resources[key].ready = fnv1.READY_TRUE
+            composed.append(key)
+        return composed
 
     def _parse(self, kind: str, model: type[_T], key: str) -> list[_T]:
         """Parse the required resources under `key`, skipping what won't.
@@ -955,36 +897,6 @@ class Composer:
             )
         return list(sinks.values()), extensions
 
-    def compose_gateway_usages(self) -> None:
-        """Compose Usages ordering the hand-rendered gateway teardown.
-
-        The Envoy Gateway controller must outlive the Gateway and
-        GatewayClass it manages: they carry finalizers it has to process
-        on delete. The chain is Gateway Object -> GatewayClass Object ->
-        envoy-gateway Release (a stack component, labelled by the
-        renderer). These are hand-written because the gateway pair isn't
-        stack data; every other ordering edge derives from depends_on.
-
-        The GatewayClass-by-Gateway edge is composed only while there is a
-        Gateway to be protected by. A Usage whose "by" selector matches
-        nothing errors on every reconcile, and compose_gateway withholds the
-        Gateway until the cluster has an InferenceGateway CA to trust.
-        """
-        usages = [
-            ("usage-envoy-gateway-by-gateway-class", _RELEASE_REF, "envoy-gateway", _OBJECT_REF, "gateway-class"),
-        ]
-        if self.serves_gateway():
-            usages.insert(
-                0,
-                ("usage-gateway-class-by-gateway", _OBJECT_REF, "gateway-class", _OBJECT_REF, "gateway"),
-            )
-        for key, of_ref, of_key, by_ref, by_key in usages:
-            resource.update(
-                self.rsp.desired.resources[key],
-                _usage(of_ref, of_key, by_ref, by_key),
-            )
-            self.rsp.desired.resources[key].ready = fnv1.READY_TRUE
-
     def observed_ca_certificate(self) -> str | None:
         """The cluster CA's certificate, read off the ConfigMap trust-manager
         syncs. A ConfigMap holds it as plain text, so unlike a Secret there is
@@ -1032,31 +944,24 @@ class Composer:
         """Mark composed resources as ready.
 
         The ProviderConfigs have no readiness condition of their own,
-        but they must not be ready on arrival: on the first reconcile
-        they and the Usages are the only desired resources, and marking
-        them ready would let the composite report Ready before a single
-        stack component exists. Observed - the same gate the rest of the
-        stack opens on - is what makes them count. Everything rendered
+        but they must not be ready on arrival. Everything targeting the
+        remote cluster depends on one of them, so their readiness is
+        what releases the rest of the graph: calling them ready while
+        Crossplane has yet to persist them would let the whole stack be
+        created into ProviderConfigs that don't exist, the race the
+        dependency edges exist to avoid. Being observed is what makes
+        them count, and it keeps the composite from reporting Ready
+        before a single stack component exists. Everything rendered
         from the stack (and the gateway pair) is ready when its observed
         Ready condition is True - for Releases that's the Helm release
         deployed (its workloads rolled out, where the entry sets wait),
         for Objects the readiness policy (SuccessfulCreate, or the
         entry's CEL query).
         """
-        for r in ("provider-config-kubernetes", "provider-config-helm"):
+        for r in (_PC_KUBERNETES, _PC_HELM):
             if r in self.rsp.desired.resources and r in self.req.observed.resources:
                 self.rsp.desired.resources[r].ready = fnv1.READY_TRUE
 
         for r in rendered:
             if resource.get_condition(self.req.observed.resources.get(r), "Ready").status == "True":
                 self.rsp.desired.resources[r].ready = fnv1.READY_TRUE
-
-    def provider_configs_observed(self) -> bool:
-        """Check if both ProviderConfigs have been persisted by Crossplane from
-        a previous reconcile. Resources targeting the remote cluster are gated
-        on this to avoid transient 'ProviderConfig not found' errors on first
-        creation."""
-        return (
-            "provider-config-helm" in self.req.observed.resources
-            and "provider-config-kubernetes" in self.req.observed.resources
-        )
